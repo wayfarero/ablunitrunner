@@ -15,6 +15,9 @@ OE 12 installed
 
 ## Release Notes
 
+### 1.0.3
+- repository url updated in package.json
+
 ### 1.0.2
 
 - Improved robustness when running tests for the first time in a new workspace.
