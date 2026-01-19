@@ -1,0 +1,8 @@
+# Development folders
+.vscode
+.git
+.gitignore
+
+build
+tools
+

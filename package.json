@@ -1,0 +1,56 @@
+{
+  "name": "ablunitrunner",
+  "displayName": "ABLUnit Runner",
+  "description": "A simple extension to run an external bat script that triggers the ABLUnit run and reads results.xml afterwards into the VScode Test Results view",
+  "version": "1.0.2",
+  "publisher": "vasile.mocan@wayfare.ro",
+  "repository": "https://git.wayfare.ro/oetools/ablunitrunner.git",
+  "engines": {
+    "vscode": "^1.107.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ABLUnitRunner.RunABLUnitOnFile",
+        "title": "Run ABLUnit"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "ABLUnitRunner.RunABLUnitOnFile",
+          "when": "editorTextFocus && (resourceExtname == .cls || resourceExtname == .p)",
+          "group": "navigation"
+        }
+      ],
+       "explorer/context": [
+        {
+          "command": "ABLUnitRunner.RunABLUnitOnFile",
+          "when": "resourceExtname == .cls || resourceExtname == .p",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "pretest": "npm run lint",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.107.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.39.1"
+  },
+  "dependencies": {
+    "xmldom": "^0.6.0"
+  }
+}
