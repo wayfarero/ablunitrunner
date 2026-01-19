@@ -3,8 +3,8 @@
   "displayName": "ABLUnit Runner",
   "description": "A simple extension to run an external bat script that triggers the ABLUnit run and reads results.xml afterwards into the VScode Test Results view",
   "version": "1.0.2",
-  "publisher": "vasile.mocan@wayfare.ro",
-  "repository": "https://git.wayfare.ro/oetools/ablunitrunner.git",
+  "publisher": "wayfare",
+  "repository": "https://github.com/wayfarero/ablunitrunner",
   "engines": {
     "vscode": "^1.107.0"
   },
