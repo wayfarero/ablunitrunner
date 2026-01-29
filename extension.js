@@ -38,6 +38,43 @@ function getDirectChildrenByTag(node, tagName) {
 }
 
 
+function getDirectChildText(node, tagName) {
+    for (let i = 0; i < node.childNodes.length; i++) {
+        const child = node.childNodes[i];
+        if (child.nodeType === 1 && child.tagName === tagName) {
+            if (child.childNodes.length > 0) {
+                return child.childNodes[0].nodeValue;
+            }
+        }
+    }
+    return '';
+}
+
+
+function findProjectRoot(startDir) {
+    let currentDir = startDir;
+    const fsRoot = path.parse(startDir).root;
+    while (currentDir !== fsRoot) {
+        const propathFile = path.join(currentDir, '.propath');
+        const oedgeProjectFile = path.join(currentDir, 'openedge-project.json');
+        if (fs.existsSync(propathFile) || fs.existsSync(oedgeProjectFile)) {
+            return currentDir;
+        }
+        currentDir = path.dirname(currentDir);
+    }
+    // Check the root directory itself
+    const propathFile = path.join(currentDir, '.propath');
+    const oedgeProjectFile = path.join(currentDir, 'openedge-project.json');
+    if (fs.existsSync(propathFile) || fs.existsSync(oedgeProjectFile)) {
+        return currentDir;
+    }
+
+    return null;
+}
+
+
+
+
 /**
  * Return a newline-separated string (one connect per line) of all `connect` values from the project's `dbConnections` array.
  * - Preserves order
@@ -75,62 +112,154 @@ function getDbConnectsSpaceSeparated(projectCfg) {
  */
 function loadOpenEdgeProjectConfig(filePath) {
     let cfg = {};
-    let cfgPath, propathPath;
+    let workspaceRoot;
+    let oeProjectRoot;
+
+    vscode.window.showInformationMessage("started loadOpenEdgeProjectConfig for file: " + filePath);
 
     if (filePath) {
         try {
             const fileUri = vscode.Uri.file(filePath);
-            const containingFolder = vscode.workspace.getWorkspaceFolder(fileUri);
-            if (containingFolder) {
-                cfgPath = path.join(containingFolder.uri.fsPath, 'openedge-project.json');
-                propathPath = path.join(containingFolder.uri.fsPath, '.propath');
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+            if (workspaceFolder) {
+                workspaceRoot = workspaceFolder.uri.fsPath;
             }
         } catch (err) {
             console.error('Failed to determine workspace folder for file:', err);
+            return {}; // Return empty on error
         }
     }
 
-    if (cfgPath && fs.existsSync(cfgPath)) {
+    if (!workspaceRoot) {
+        return {}; // Cannot determine a root, return empty config
+    }
+    
+    oeProjectRoot = findProjectRoot(path.dirname(filePath));
+    if (!oeProjectRoot) {
+        oeProjectRoot = workspaceRoot; // Fallback
+    }
+
+    const openedgeProjectJsonPath = path.join(oeProjectRoot, 'openedge-project.json');
+    const propathPath = path.join(oeProjectRoot, '.propath');
+
+    if (fs.existsSync(openedgeProjectJsonPath)) {
         try {
-            const raw = fs.readFileSync(cfgPath, 'utf8');
+            const raw = fs.readFileSync(openedgeProjectJsonPath, 'utf8');
             cfg = JSON.parse(raw);
-            return cfg;
+            vscode.window.showInformationMessage("openedge-project.json parsed: " + openedgeProjectJsonPath);
         } catch (err) {
-            console.error('Failed to load openedge-project.json:', err);
+           vscode.window.showErrorMessage('Failed to load openedge-project.json: ' + (err.message || err.toString()));
         }
     }
 
-    if (propathPath && fs.existsSync(propathPath)) {
+    if (!cfg.buildPath && fs.existsSync(propathPath)) {
         try {
             const raw = fs.readFileSync(propathPath, 'utf8');
             const xml = new DOMParser().parseFromString(raw, 'text/xml');
             const propathEntries = xml.getElementsByTagName('propathentry');
             const buildPath = [];
             for (let i = 0; i < propathEntries.length; i++) {
-                const pathValue = propathEntries[i].getAttribute('path');
+                let pathValue = propathEntries[i].getAttribute('path');
+                const kindValue = propathEntries[i].getAttribute('kind');
                 if (pathValue) {
-                    buildPath.push({
-                        type: 'propath',
-                        path: pathValue
-                    });
+                    pathValue = pathValue.replace(/@\{ROOT\}/g, '.');
+                    if (pathValue.startsWith('\\')) {
+                        pathValue = '..' + pathValue;
+                    }
+                    if (kindValue === 'src') {
+                        buildPath.push({
+                            type: 'source',
+                            path: pathValue
+                        });
+                    } else {
+                        buildPath.push({
+                            type: 'propath',
+                            path: pathValue
+                        });
+                    }
                 }
             }
             cfg.buildPath = buildPath;
+            vscode.window.showInformationMessage(".propath parsed: " + propathPath);
+
         } catch (err) {
             console.error('Failed to load or parse .propath file:', err);
+        }
+    }
+
+    let metadataRoot;
+    if (vscode.workspace.workspaceFile) {
+        metadataRoot = path.dirname(vscode.workspace.workspaceFile.fsPath);
+    } else {
+        metadataRoot = workspaceRoot;
+    }
+
+    const dbConnXmlPath = path.join(metadataRoot, '.metadata', '.plugins', 'com.openedge.pdt.project', 'databaseConnection.xml');
+    const dbConnFilterPath = path.join(oeProjectRoot, '.dbconnection');
+    
+    if (!cfg.dbConnections && fs.existsSync(dbConnXmlPath)) {
+        vscode.window.showInformationMessage("databaseConnection.xml exists: " + dbConnXmlPath);
+        try {
+            let activeIds = null;
+            if (fs.existsSync(dbConnFilterPath)) {
+                vscode.window.showInformationMessage(".dbconnection found: " + dbConnFilterPath);
+                try {
+                    const rawDbConnFilter = fs.readFileSync(dbConnFilterPath, 'utf8');
+                    const xmlDbConnFilter = new DOMParser().parseFromString(rawDbConnFilter, 'text/xml');
+                    const connectionEntries = xmlDbConnFilter.getElementsByTagName('connectionentry');
+                    activeIds = [];
+                    for (let i = 0; i < connectionEntries.length; i++) {
+                        const identifier = connectionEntries[i].getAttribute('identifier');
+                        if (identifier) {
+                            activeIds.push(identifier);
+                        }
+                    }
+                } catch (err) {
+                    console.error('Failed to parse .dbconnection file:', err);
+                    activeIds = null; // Revert to no filter if parsing fails
+                }
+            }
+
+            const rawXml = fs.readFileSync(dbConnXmlPath, 'utf8');
+            const xml = new DOMParser().parseFromString(rawXml, 'text/xml');
+            const dbConnections = xml.getElementsByTagName('databaseconnection');
+            const connections = [];
+
+            for (let i = 0; i < dbConnections.length; i++) {
+                const dbConnNode = dbConnections[i];
+                const identifier = dbConnNode.getAttribute('identifier');
+
+                if (activeIds === null || activeIds.includes(identifier)) {
+                    const db = getDirectChildText(dbConnNode, 'physicalname');
+                    const host = getDirectChildText(dbConnNode, 'host');
+                    const service = getDirectChildText(dbConnNode, 'service');
+
+                    if (db && host && service) {
+                        const connectString = `-db ${db} -H ${host} -S ${service}`;
+                        connections.push({
+                            connect: connectString
+                        });
+                    }
+                }
+            }
+            cfg.dbConnections = connections;
+            vscode.window.showInformationMessage("databaseConnection.xml parsed.");
+        } catch (err) {
+            console.error('Failed to load or parse databaseConnection.xml file:', err);
         }
     }
 
     return cfg;
 }
 
+
+
 /**
  * Construct the propath string for the project:
- * - Uses the 'source' buildPath entry as the first element (falls back to '.')
- * - Includes all 'propath' entries after it
- * - Normalizes escaped slashes and expands ${DLC} / %DLC% when dlcEnv is provided
+ * - Includes all buildPath entries regardless of type
+ * - Normalizes escaped slashes and replaces @{DLC}, ${DLC}, @{dlc}, ${dlc} with %DLC% for expansion
  * - Removes duplicates while preserving order
- * - Joins entries using the platform `path.delimiter` (falls back to ';')
+ * - Joins entries using comma delimiter
  *
  * @param {Object} projectCfg
  * @returns {string}
@@ -138,26 +267,16 @@ function loadOpenEdgeProjectConfig(filePath) {
 function buildPropathStr(projectCfg) {
     const collected = [];
 
-    let sourcePath = '.';
     if (Array.isArray(projectCfg.buildPath)) {
-        const src = projectCfg.buildPath.find(p => p.type === 'source' && p.path);
-        if (src && src.path) {
-            sourcePath = src.path.replace(/\\\//g, '/');
-            // Replace ${DLC} with %DLC% (so Windows batch files can expand it); if dlcEnv is provided expand %DLC% to its value
-            sourcePath = sourcePath.replace(/\$\{DLC\}/g, '%DLC%');
+        // Add all path entries regardless of type
+        for (const entry of projectCfg.buildPath) {
+            if (entry && entry.path) {
+                let s = entry.path.replace(/\\\//g, '/');
+                // Replace @{DLC}, ${DLC}, @{dlc}, ${dlc} with %DLC%
+                s = s.replace(/@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}/g, '%DLC%');
+                collected.push(s);
+            }
         }
-
-        const propaths = projectCfg.buildPath
-            .filter(p => p.type === 'propath' && p.path)
-            .map(p => {
-                let s = p.path.replace(/\\\//g, '/');
-                s = s.replace(/\$\{DLC\}/g, '%DLC%');
-                return s;
-            });
-
-        collected.push(sourcePath, ...propaths);
-    } else {
-        collected.push(sourcePath);
     }
 
     // Remove duplicates while preserving order
@@ -394,7 +513,6 @@ function activate(context) {
         const runner = path.join( context.extensionPath, 'resources', 'scripts', 'run_ABLUNIT.bat' );
         const extraParams = projectCfg.extraParameters || '';
         const propathStr = buildPropathStr(projectCfg);
-
         const dbConnectStr = getDbConnectsSpaceSeparated(projectCfg);
 
 
@@ -402,7 +520,30 @@ function activate(context) {
         const fileUri = vscode.Uri.file(filePath);
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
         const workdir = workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(filePath);
-        const relPath = workspaceFolder ? path.relative(workspaceFolder.uri.fsPath, filePath).replace(/\\/g, '/') : path.basename(filePath);
+        let relPath = workspaceFolder ? path.relative(workspaceFolder.uri.fsPath, filePath).replace(/\\/g, '/') : path.basename(filePath);
+
+        if (filePath.toLowerCase().endsWith('.cls')) {
+            const sourcePaths = projectCfg.buildPath
+                ?.filter(p => p.type === 'source' && p.path)
+                .map(p => {
+                    let pth = p.path.replace(/\\/g, '/');
+                    // Remove leading './' if it exists and path is not just '.'
+                    if (pth.startsWith('./') && pth.length > 1) {
+                        pth = pth.substring(2);
+                    } else if (pth === '.') { // If path is just '.', treat as empty string for root matching
+                        pth = '';
+                    }
+                    return pth;
+                }) || [];
+            sourcePaths.sort((a, b) => b.length - a.length); // Sort by longest path first
+
+            for (const sourcePath of sourcePaths) {
+                if (relPath.startsWith(sourcePath + '/')) {
+                    relPath = relPath.substring(sourcePath.length + 1);
+                    break;
+                }
+            }
+        }
 
         const outputFolder = path.join(workdir, '.ablunitrunner');
 
