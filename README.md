@@ -20,9 +20,9 @@
 
 ### AblUnit Runner usage
 
-![Editor context](hhttps://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/editor.gif)
+![Editor context](https://https://github.com/wayfarero/ablunitrunner/tree/main/resources/demo/editor.gif)
 
-![Explorer context](hhttps://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/explorer.gif)
+![Explorer context](https://https://github.com/wayfarero/ablunitrunner/tree/main/resources/demo/explorer.gif)
 
 ## Release Notes
 
