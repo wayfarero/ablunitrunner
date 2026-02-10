@@ -1,6 +1,8 @@
 # Change Log
 
-  Initial release 1.0.0
+## 1.0.6
+
+- Fixed README demo GIF links so they display correctly.
 
 ## 1.0.5
 

@@ -18,13 +18,17 @@
 **Example:**
 - **Windows:** `DLC=C:\Progress\OpenEdge`
 
-### AblUnit Runner usage
+### ABLUnit Runner Editor Context Menu
+![Editor context](https://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/editor.gif)
 
-![Editor context](https://github.com/wayfarero/ablunitrunner/blob/main/resources/demo/editor.gif)
-
-![Explorer context](https://github.com/wayfarero/ablunitrunner/blob/main/resources/demo/explorer.gif)
+### ABLUnit Runner Explorer Context Menu
+![Explorer context](https://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/explorer.gif)
 
 ## Release Notes
+
+### 1.0.6
+
+- Fixed README demo GIF links so they display correctly.
 
 ### 1.0.5
 
