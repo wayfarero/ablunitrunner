@@ -2,15 +2,37 @@
 
   Initial release 1.0.0
 
+## 1.0.5
+
+- Updated README.md, CHANGELOG.md and package.json
+- Removed obsolete/unnecessary files.
+
 ## 1.0.4
 
-- **Enhanced OpenEdge Project Configuration Support:**
-    - The extension now more robustly identifies the OpenEdge project root within various workspace structures, including multi-root workspaces.
-    - Improved parsing of `.propath` files:
-        - Correctly identifies source (`src`) entries, enabling proper prefix stripping for relevant test files.
-        - Replaces `@{ROOT}` with `.` in `.propath` entries for accurate path resolution.
-        - Handles project-relative paths starting with `\` by prepending `..` for better compatibility.
-- **Database Connection Discovery:**
-    - Integrated support for discovering database connection details from OpenEdge Developer Studio's `databaseConnection.xml` file.
-    - Reads project-specific database connection identifiers from `.dbconnection` files (located next to `.propath`) to filter and load only relevant database configurations.
-    - Generates connection strings in the format `-db <physicalname> -H <host> -S <service>` for use in the ABLUnit test environment.
+- **Native OpenEdge Developer Studio Workspace Support:**
+  - The extension now automatically discovers and uses configurations from native OpenEdge Developer Studio projects.
+  - **PROPATH Recognition:**
+    - It correctly parses `.propath` files to build the full propath for the test execution.
+    - It robustly finds the project root, making it compatible with multi-root and nested project structures.
+    - It handles various path formats, including `@{ROOT}` and paths starting with `\`.
+  - **Database Connection Discovery:**
+    - It automatically reads database connection details from the workspace's central `databaseConnection.xml` file.
+    - It uses the project-specific `.dbconnection` file to load only the database connections that are relevant to the project being tested.
+- General bug fixes and stability improvements.
+
+## 1.0.3
+- Repository url updated in package.json
+
+## 1.0.2
+
+- Improved robustness when running tests for the first time in a new workspace.
+- Added support for OpenEdge Developer Studio project folders (which use a `.propath` file for propath configuration when `openedge-project.json` is absent).
+- General bug fixes and stability improvements.
+
+## 1.0.1
+
+- Cleaner log, grouped output files into a .ablunitrunner folder
+
+## 1.0.0
+
+- Initial release of ABLUnitRunner VSCode extension

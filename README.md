@@ -1,23 +1,35 @@
-# ABLUnitResults README
+# ABLUnit Runner README
+  
+  A VS Code extension that executes a batch script to initiate [ABLUnit](https://docs.progress.com/bundle/openedge-developer-studio-help/page/Learn-About-ABLUnit-Test-Framework.html) test runs and subsequently parses and imports the results into the VS Code Test Results view. The extension is optimized for executing long-running and large-scale unit test suites.
 
 ## Features
 
 - **Seamless ABLUnit Testing:** Run ABLUnit tests directly from VS Code and view the results in the Test Results view.
 - **Flexible Configuration Support:** The extension automatically detects and uses your project's configuration. It supports:
-    - **OpenEdge Developer Studio workspaces:** Automatically reads `.propath`, `databaseConnection.xml`, and `.dbconnection` files to configure the test environment, allowing you to import and use your existing Developer Studio projects in VS Code.
-    - **OpenEdge ABL Extension workspaces:** Natively supports `openedge-project.json` for workspace configuration, integrating smoothly with the environment provided by the [OpenEdge ABL Language & Debug Support extension from Riverside Software](https://marketplace.visualstudio.com/items?itemName=RiversideSoftware.openedge-abl-lsp).
+    - **[Progress Developer Studio for OpenEdge](https://docs.progress.com/bundle/openedge-developer-studio-help/page/Learn-About-Progress-Developer-Studio-for-OpenEdge.html) workspaces:** Automatically reads `.propath`, `databaseConnection.xml`, and `.dbconnection` files from an existing Openedge Developer Studio workspace to configure the test environment, allowing you to import and use your existing Developer Studio projects in VS Code without any extra configuration.
+    - **[Riverside Software OpenEdge ABL Extension](https://marketplace.visualstudio.com/items?itemName=RiversideSoftware.openedge-abl-lsp) workspaces:** Automatically reads  `openedge-project.json` from the OpenEdge ABL extension project configuration, enabling a smooth integration with an existing VSCode ABL workspace environment.
 - **Designed for Large and Small Projects:** While optimized for large, time-consuming test suites, the extension is equally effective for running single, simple test cases.
 
 ## Requirements
 
-- Progress OpenEdge 11.7 or later installed
+- **[Progress OpenEdge](https://www.progress.com/openedge)** 11.7 or later installed
 - the `DLC` environment variable needs to be set to the Progress OpenEdge installation path.
 
 **Example:**
 - **Windows:** `DLC=C:\Progress\OpenEdge`
 
+### AblUnit Runner usage
+
+![Editor context](hhttps://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/editor.gif)
+
+![Explorer context](hhttps://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/explorer.gif)
 
 ## Release Notes
+
+### 1.0.5
+
+- Updated README.md, CHANGELOG.md and package.json.
+- Removed obsolete/unnecessary files.
 
 ### 1.0.4
 

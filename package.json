@@ -1,16 +1,37 @@
 {
   "name": "ablunitrunner",
   "displayName": "ABLUnit Runner",
-  "description": "A simple extension to run an external bat script that triggers the ABLUnit run and reads results.xml afterwards into the VScode Test Results view",
-  "version": "1.0.4",
+  "description": "A VSCode extension designed for running ABLUnit tests without any time limits",
+  "version": "1.0.5",
   "publisher": "wayfare",
+  "icon": "resources/logo.png",
+  "homepage": "https://github.com/wayfarero/ablunitrunner/blob/main/README.md",
   "repository": "https://github.com/wayfarero/ablunitrunner",
+  "bugs": {
+		"url": "https://github.com/wayfarero/ablunitrunner/issues"
+	},
+  "license": "MIT",
+	"licenses": [
+		{
+			"type": "MIT",
+			"url": "https://github.com/wayfarero/ablunitrunner/blob/main/LICENSE"
+		}
+	],
   "engines": {
     "vscode": "^1.107.0"
   },
   "categories": [
-    "Other"
+    "Testing"
   ],
+  "keywords": [
+		"4gl",
+		"abl",
+		"ablunit",
+		"oeunit",
+		"openedge",
+		"pdsoe",
+		"progress"
+	],
   "activationEvents": [],
   "main": "./extension.js",
   "contributes": {
