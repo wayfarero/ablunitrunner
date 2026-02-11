@@ -6,6 +6,15 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { DOMParser } = require('xmldom');
 
+// Global ABLUnit Runner output channel (singleton)
+let ablUnitOutputChannel;
+function getAblUnitOutputChannel() {
+    if (!ablUnitOutputChannel) {
+        ablUnitOutputChannel = vscode.window.createOutputChannel('ABLUnit Runner');
+    }
+    return ablUnitOutputChannel;
+}
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 
@@ -50,6 +59,69 @@ function getDirectChildText(node, tagName) {
     return '';
 }
 
+// Escape a string for safe insertion into a RegExp
+function escapeRegExp(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Return true if the character at pos is a word boundary relative to ABL identifiers
+function isWordBoundary(line, pos) {
+    if (pos < 0 || pos >= line.length) return true;
+    return !/[A-Za-z0-9_]/.test(line[pos]);
+}
+
+/**
+ * Find the range of a test declaration for a given name in an ABL source file.
+ * Prioritizes METHOD, then PROCEDURE, then FUNCTION lines, and falls back to
+ * the first word-boundary occurrence of the test name.
+ * @param {string} filePath
+ * @param {string} testName
+ * @returns {vscode.Range}
+ */
+function findAblTestRange(filePath, testName) {
+    try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const lines = raw.split(/\r?\n/);
+        const nameLower = (testName || '').toLowerCase();
+
+        const tryFindOnLines = (predicate) => {
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (!predicate(line)) continue;
+                const lower = line.toLowerCase();
+                let idx = lower.indexOf(nameLower);
+                while (idx >= 0) {
+                    const before = idx - 1;
+                    const after = idx + testName.length;
+                    if (isWordBoundary(lower, before) && isWordBoundary(lower, after)) {
+                        return new vscode.Range(i, idx, i, idx + testName.length);
+                    }
+                    idx = lower.indexOf(nameLower, idx + 1);
+                }
+            }
+            return undefined;
+        };
+
+        // 1) METHOD ... <name>
+        const methodRange = tryFindOnLines(line => /^\s*method\b/i.test(line));
+        if (methodRange) return methodRange;
+
+        // 2) PROCEDURE <name>
+        const procRange = tryFindOnLines(line => /^\s*procedure\b/i.test(line));
+        if (procRange) return procRange;
+
+        // 3) FUNCTION <name>
+        const funcRange = tryFindOnLines(line => /^\s*function\b/i.test(line));
+        if (funcRange) return funcRange;
+
+        // 4) Fallback: first word-boundary occurrence anywhere
+        const anyRange = tryFindOnLines(() => true);
+        if (anyRange) return anyRange;
+    } catch (e) {
+        // ignore and fall back
+    }
+    return new vscode.Range(0, 0, 0, 0);
+}
 
 function findProjectRoot(startDir) {
     let currentDir = startDir;
@@ -298,12 +370,12 @@ function buildPropathStr(projectCfg) {
  *
  * @param {string} commandString
  * @param {string} filePath
- * @param {string} [channelName]
+ * @param {function|undefined} [onCloseCommand]
  */
-function executeCommandString(commandString, filePath, channelName = 'ABLUnit Runner', onCloseCommand) {
+function executeCommandString(commandString, filePath, onCloseCommand) {
     try {
         const workspaceFolderPath = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath || process.cwd();
-        const outputChannel = vscode.window.createOutputChannel(channelName);
+        const outputChannel = getAblUnitOutputChannel();
         outputChannel.show(true);
         outputChannel.appendLine(`Executing: ${commandString}`);
 
@@ -336,7 +408,7 @@ function executeCommandString(commandString, filePath, channelName = 'ABLUnit Ru
             }
         });
 
-        vscode.window.showInformationMessage(`Executing command (see '${channelName}' output)`);
+        vscode.window.showInformationMessage(`Executing command (see 'ABLUnit Runner' output)`);
     } catch (err) {
         console.error('Failed to execute command:', err);
         vscode.window.showErrorMessage('Failed to execute prepared command. See developer console for details.');
@@ -350,12 +422,9 @@ function executeCommandString(commandString, filePath, channelName = 'ABLUnit Ru
  */
 function loadAblUnitResults(controller, xmlPath, run) {
 
-    // //Create output channel
-    // let ABLUnitResultsLog = vscode.window.createOutputChannel("ABLUnitResultsLog");
-    // //Write to output.    
-    // ABLUnitResultsLog.appendLine("Started loadAblUnitResults..");
-    // ABLUnitResultsLog.show(true);
-    
+    const outputChannel = getAblUnitOutputChannel();
+    outputChannel.appendLine(`Start loading AblUnit results..`);    
+
     vscode.commands.executeCommand('workbench.view.testing');
     vscode.commands.executeCommand('testing.showMostRecentOutput');
     
@@ -365,14 +434,19 @@ function loadAblUnitResults(controller, xmlPath, run) {
     const xml = parseResultsXml(xmlPath);
     const testSuites = xml.getElementsByTagName("testsuite");
 
+    // Use the same workspace-root logic as loadOpenEdgeProjectConfig
+    const xmlWorkspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(xmlPath));
+    const baseWorkspacePath = xmlWorkspaceFolder ? xmlWorkspaceFolder.uri.fsPath : path.dirname(xmlPath);
+
     for (let i = 0; i < testSuites.length; i++) {
         const suiteNode = testSuites[i];
 
         const suiteName = suiteNode.getAttribute("classname") || "UnnamedSuite";
         const suiteFile = suiteNode.getAttribute("name") || "";
-        const suiteId= suiteNode.getAttribute("id") || "";
-        const suiteUri = vscode.Uri.file(path.resolve(suiteFile));
-
+        const suiteId = suiteNode.getAttribute("id") || "";
+        const suitePath = path.isAbsolute(suiteFile) ? suiteFile : path.join(baseWorkspacePath, suiteFile);
+        const suiteUri = vscode.Uri.file(suitePath);
+        
         // ---- Create Suite TestItem ----
         const suiteItem = controller.createTestItem(suiteId, suiteName, suiteUri);
         controller.items.add(suiteItem);
@@ -382,24 +456,23 @@ function loadAblUnitResults(controller, xmlPath, run) {
         const testCaseNodes = getDirectChildrenByTag(suiteNode, "testcase");
 
         for (let j = 0; j < testCaseNodes.length; j++) {
+
             const testNode = testCaseNodes[j];
-            
             const suiteFile = suiteNode.getAttribute("name") || "";
             const testName = testNode.getAttribute("name") || "UnnamedTest";
-            const testFile = testNode.getAttribute("classname") || suiteFile ;
-            const testLine = parseInt(testNode.getAttribute("line") || "1", 10);
+            // Prefer the real file path provided by the suite for the test's URI
+            const testFile = suiteFile;
             const testTime = testNode.getAttribute('time') || '0.000';
             const testStatus = testNode.getAttribute("status");
 
-            const uri = vscode.Uri.file(path.resolve(testFile));
+            const testPath = path.isAbsolute(testFile) ? testFile : path.join(baseWorkspacePath, testFile);
+            const uri = vscode.Uri.file(testPath);
 
-            // ABLUnitResultsLog.appendLine("handling testName: " + testName);
-            // ABLUnitResultsLog.show(true);
-
-            const range = new vscode.Range(testLine - 1, 0, testLine - 1, 0);
+            const range = findAblTestRange(uri.fsPath, testName);
 
             // ---- Create Test Item ----
             const testId = `${suiteId}:${testName}`;
+
             const testItem = controller.createTestItem(testId, testName + ' (' + testTime + ')', uri);
 
             // Let VS Code highlight the test location
@@ -428,6 +501,8 @@ function loadAblUnitResults(controller, xmlPath, run) {
 
         }
     }
+    outputChannel.appendLine(`Done loading AblUnit results.`);    
+
 }
 
 
@@ -592,7 +667,7 @@ function activate(context) {
             (dlcEnv ? ` --dlc "${dlcEnv}"` : '');
 
         // Execute the prepared command in the workspace folder and run the internal refresh when it finishes
-        executeCommandString(commandString, workdir, 'ABLUnit Runner', readResultsXml.bind(null, outputFolder));
+        executeCommandString(commandString, workdir, readResultsXml.bind(null, outputFolder));
     });
     
     context.subscriptions.push(runABLUnitOnFile);
@@ -604,7 +679,7 @@ function deactivate() {}
 
 module.exports = {
 	activate,
-	deactivate
+    deactivate
 }
 
 

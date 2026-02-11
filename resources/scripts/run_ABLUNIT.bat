@@ -8,7 +8,7 @@
  shift
 if not "%~1"=="" goto GETOPTS
 
-echo Start ABLUnit testing
+echo Start ABLUnit testing..
 
 set ATTR_ABLUNIT_EVENT_FILE=%WORKDIR%\.ablunitrunner\ablunit_event.log
 if exist "%ATTR_ABLUNIT_EVENT_FILE%" del /q "%ATTR_ABLUNIT_EVENT_FILE%"
@@ -17,4 +17,4 @@ cd %WORKDIR%
 %DLC%\bin\_progres -b -p ABLUnitCore.p -pf .ablunitrunner/dbconn.pf -pf .ablunitrunner/extra.pf -param "%TESTFILE% -outputLocation .ablunitrunner" -baseADE "%PROPATH%"
 
 
-echo Done ABLUnit testing
+echo Done ABLUnit testing.

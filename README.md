@@ -26,6 +26,10 @@
 
 ## Release Notes
 
+### 1.0.8
+
+- Bug fix: corrected navigation from Test Results view to tests.
+
 ### 1.0.7
 
 - Ensures a clean slate before every run:

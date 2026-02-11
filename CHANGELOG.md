@@ -1,5 +1,9 @@
 # Change Log
 
+## 1.0.8
+
+- Bug fix: corrected navigation from Test Results view to tests.
+
 ## 1.0.7
 
 - Added a fix to clear previous test run artifacts before each execution:
