@@ -1,5 +1,11 @@
 # Change Log
 
+## 1.0.7
+
+- Added a fix to clear previous test run artifacts before each execution:
+  - Deletes the `results.xml` file in the `.ablunitrunner` output folder at the start of every "Run ABLUnit" command.
+  - Clears and refreshes the VS Code Testing view so stale results are not shown prior to loading fresh results.
+
 ## 1.0.6
 
 - Fixed README demo GIF links so they display correctly.

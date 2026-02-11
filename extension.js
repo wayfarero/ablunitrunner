@@ -547,6 +547,19 @@ function activate(context) {
 
         const outputFolder = path.join(workdir, '.ablunitrunner');
 
+        // Clear the Testing view and previous results immediately
+        try {
+            controller.items.replace([]);
+            controller.invalidateTestResults();
+            // Publish a blank, most-recent test run so the output panel resets
+            const blankRun = controller.createTestRun(new vscode.TestRunRequest(), 'No current test results', true);
+            blankRun.end();
+            vscode.commands.executeCommand('workbench.view.testing');
+            vscode.commands.executeCommand('testing.showMostRecentOutput');
+        } catch (clearErr) {
+            console.error('Failed to clear testing view/results:', clearErr);
+        }
+
         try {
             if (!fs.existsSync(outputFolder)){
                 fs.mkdirSync(outputFolder, { recursive: true });
@@ -557,6 +570,17 @@ function activate(context) {
 
             const extraPfPath = path.join(outputFolder,'extra.pf');
             fs.writeFileSync(extraPfPath, extraParams || '', 'utf8');
+
+            // Remove any previous results.xml at the start of the run
+            const resultsXmlPath = path.join(outputFolder, 'results.xml');
+            try {
+                if (fs.existsSync(resultsXmlPath)) {
+                    fs.unlinkSync(resultsXmlPath);
+                }
+            } catch (delErr) {
+                console.error('Failed to delete previous results.xml:', delErr);
+                // Non-fatal: continue with the run even if deletion fails
+            }
         } catch (err) {
             console.error('Failed to write to .ablunitrunner folder:', err);
             vscode.window.showErrorMessage('Failed to write to .ablunitrunner folder: ' + err.message);

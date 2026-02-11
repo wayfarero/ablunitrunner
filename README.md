@@ -26,6 +26,12 @@
 
 ## Release Notes
 
+### 1.0.7
+
+- Ensures a clean slate before every run:
+  - Deletes `.ablunitrunner/results.xml` at command start.
+  - Clears and refreshes the VS Code Testing view so stale results aren’t displayed prior to loading new results.
+
 ### 1.0.6
 
 - Fixed README demo GIF links so they display correctly.
