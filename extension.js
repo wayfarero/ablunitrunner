@@ -59,10 +59,6 @@ function getDirectChildText(node, tagName) {
     return '';
 }
 
-// Escape a string for safe insertion into a RegExp
-function escapeRegExp(str) {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 // Return true if the character at pos is a word boundary relative to ABL identifiers
 function isWordBoundary(line, pos) {
@@ -187,7 +183,7 @@ function loadOpenEdgeProjectConfig(filePath) {
     let workspaceRoot;
     let oeProjectRoot;
 
-    vscode.window.showInformationMessage("started loadOpenEdgeProjectConfig for file: " + filePath);
+    //vscode.window.showInformationMessage("started loadOpenEdgeProjectConfig for file: " + filePath);
 
     if (filePath) {
         try {
@@ -197,6 +193,7 @@ function loadOpenEdgeProjectConfig(filePath) {
                 workspaceRoot = workspaceFolder.uri.fsPath;
             }
         } catch (err) {
+            vscode.window.showErrorMessage('Failed to determine workspace folder for file: ' + (err.message || err.toString()));
             console.error('Failed to determine workspace folder for file:', err);
             return {}; // Return empty on error
         }
@@ -218,7 +215,7 @@ function loadOpenEdgeProjectConfig(filePath) {
         try {
             const raw = fs.readFileSync(openedgeProjectJsonPath, 'utf8');
             cfg = JSON.parse(raw);
-            vscode.window.showInformationMessage("openedge-project.json parsed: " + openedgeProjectJsonPath);
+            //vscode.window.showInformationMessage("openedge-project.json parsed: " + openedgeProjectJsonPath);
         } catch (err) {
            vscode.window.showErrorMessage('Failed to load openedge-project.json: ' + (err.message || err.toString()));
         }
@@ -252,7 +249,7 @@ function loadOpenEdgeProjectConfig(filePath) {
                 }
             }
             cfg.buildPath = buildPath;
-            vscode.window.showInformationMessage(".propath parsed: " + propathPath);
+            //vscode.window.showInformationMessage(".propath parsed: " + propathPath);
 
         } catch (err) {
             console.error('Failed to load or parse .propath file:', err);
@@ -274,7 +271,7 @@ function loadOpenEdgeProjectConfig(filePath) {
         try {
             let activeIds = null;
             if (fs.existsSync(dbConnFilterPath)) {
-                vscode.window.showInformationMessage(".dbconnection found: " + dbConnFilterPath);
+                //vscode.window.showInformationMessage(".dbconnection found: " + dbConnFilterPath);
                 try {
                     const rawDbConnFilter = fs.readFileSync(dbConnFilterPath, 'utf8');
                     const xmlDbConnFilter = new DOMParser().parseFromString(rawDbConnFilter, 'text/xml');
@@ -315,8 +312,9 @@ function loadOpenEdgeProjectConfig(filePath) {
                 }
             }
             cfg.dbConnections = connections;
-            vscode.window.showInformationMessage("databaseConnection.xml parsed.");
+            //vscode.window.showInformationMessage("databaseConnection.xml parsed.");
         } catch (err) {
+            vscode.window.showErrorMessage('Failed to load or parse databaseConnection.xml file:' + (err.message || err.toString()));
             console.error('Failed to load or parse databaseConnection.xml file:', err);
         }
     }
@@ -520,7 +518,7 @@ function activate(context) {
 
 	// Internal helper: read the project's `results.xml` (optionally from a supplied project folder) and load it into the test controller
 	function readResultsXml(outputFolder) {
-		vscode.window.showInformationMessage('Refreshing ABLUnit results...');
+		//vscode.window.showInformationMessage('Refreshing ABLUnit results...');
 
 		let resultsFile;
 		if (outputFolder) {
@@ -545,23 +543,12 @@ function activate(context) {
 
 		run.end();
 
-		vscode.window.showInformationMessage('ABLUnit results refreshed.');
-/*  TODO: cleanup output folder
-        try {
-            vscode.workspace.fs.delete(vscode.Uri.file(outputFolder), {
-            recursive: true,
-            useTrash: false   // set true if you want it in OS trash
-        });
-        } catch (err) {
-            vscode.window.showErrorMessage(
-                `Failed to remove .ablunitrunner output folder: ${err.message}`
-            );
-        }
-*/
-    }
+//		vscode.window.showInformationMessage('ABLUnit results refreshed.');
+
+}
 
 
-    const runABLUnitOnFile = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnFile', function (resource) {
+    const runABLUnitOnFile = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnFile', function (resource, selectedTestName) {
         // When invoked from the explorer/context menu VS Code passes the resource (Uri) as the
         // first argument. Fall back to the active editor if it's not provided.
         const filePath = resource?.fsPath || vscode.window.activeTextEditor?.document.uri.fsPath;
@@ -570,6 +557,10 @@ function activate(context) {
             vscode.window.showInformationMessage('ABLUnit: No file selected');
             return;
         }
+
+        // Start each run with a clean output channel
+        const outputChannel = getAblUnitOutputChannel();
+        outputChannel.clear();
 
         // Attempt to load OpenEdge project configuration from the workspace folder containing the selected file
         let projectCfg = {};
@@ -662,15 +653,112 @@ function activate(context) {
             return;
         }
 
-        const commandString = `${runner} --workdir "${workdir}" --testfile "${relPath}"` +
+        const resolvedTestName = typeof selectedTestName === 'string'
+            ? (selectedTestName.trim().split(/\s+/)[0] || '')
+            : '';
+        const testFileArg = resolvedTestName ? `${relPath}#${resolvedTestName}` : relPath;
+
+        const commandString = `${runner} --workdir "${workdir}" --testfile "${testFileArg}"` +
             (propathStr ? ` --propath "${propathStr}"` : '') +
             (dlcEnv ? ` --dlc "${dlcEnv}"` : '');
 
         // Execute the prepared command in the workspace folder and run the internal refresh when it finishes
         executeCommandString(commandString, workdir, readResultsXml.bind(null, outputFolder));
     });
+
+    const runABLUnitOnTestItem = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnTestItem', function (testItemOrItems) {
+        const selected = Array.isArray(testItemOrItems) ? testItemOrItems[0] : testItemOrItems;
+
+        const reviveUri = (candidate) => {
+            if (!candidate) return undefined;
+            try {
+                return vscode.Uri.revive(candidate);
+            } catch {
+                return undefined;
+            }
+        };
+
+        // Supports both:
+        // - testing/item/context (TestItem-like args)
+        // - testing/item/result (ITestItemContext-style args with tests[] payload)
+        const testUri = reviveUri(selected?.uri)
+            || reviveUri(selected?.tests?.[0]?.uri)
+            || reviveUri(selected?.tests?.[0]?.item?.uri)
+            || reviveUri(selected?.test?.uri)
+            || reviveUri(selected?.item?.uri);
+
+        const selectedTestName = selected?.label
+            || selected?.tests?.[0]?.label
+            || selected?.tests?.[0]?.item?.label
+            || selected?.test?.label
+            || selected?.item?.label;
+
+        const selectedTestId = selected?.id
+            || selected?.tests?.[0]?.id
+            || selected?.tests?.[0]?.item?.extId
+            || selected?.tests?.[0]?.item?.id
+            || selected?.test?.id
+            || selected?.item?.id;
+
+        if (!testUri?.fsPath) {
+            vscode.window.showInformationMessage('ABLUnit: Selected test item has no source file path');
+            return;
+        }
+
+        const lower = testUri.fsPath.toLowerCase();
+        if (!lower.endsWith('.cls') && !lower.endsWith('.p')) {
+            vscode.window.showInformationMessage('ABLUnit: Selected test item is not an ABL .cls or .p file');
+            return;
+        }
+
+        // Distinguish a single test item from a suite/group item:
+        // our generated test IDs are in the form "<suiteId>:<testName>".
+        const isSingleTest = typeof selectedTestId === 'string' && selectedTestId.includes(':');
+
+        if (isSingleTest) {
+            vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri, selectedTestName);
+            return;
+        }
+
+        vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri);
+    });
+
+    const runABLUnitOnTestSuite = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnTestSuite', function (testItemOrItems) {
+        const selected = Array.isArray(testItemOrItems) ? testItemOrItems[0] : testItemOrItems;
+
+        const reviveUri = (candidate) => {
+            if (!candidate) return undefined;
+            try {
+                return vscode.Uri.revive(candidate);
+            } catch {
+                return undefined;
+            }
+        };
+
+        const testUri = reviveUri(selected?.uri)
+            || reviveUri(selected?.tests?.[0]?.uri)
+            || reviveUri(selected?.tests?.[0]?.item?.uri)
+            || reviveUri(selected?.test?.uri)
+            || reviveUri(selected?.item?.uri);
+
+        if (!testUri?.fsPath) {
+            vscode.window.showInformationMessage('ABLUnit: Selected test item has no source file path');
+            return;
+        }
+
+        const lower = testUri.fsPath.toLowerCase();
+        if (!lower.endsWith('.cls') && !lower.endsWith('.p')) {
+            vscode.window.showInformationMessage('ABLUnit: Selected test item is not an ABL .cls or .p file');
+            return;
+        }
+
+        // Suite rerun: always execute against the suite file without #<testName> suffix.
+        vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri);
+    });
     
     context.subscriptions.push(runABLUnitOnFile);
+    context.subscriptions.push(runABLUnitOnTestItem);
+    context.subscriptions.push(runABLUnitOnTestSuite);
 
 }
 

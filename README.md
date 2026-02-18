@@ -26,6 +26,11 @@
 
 ## Release Notes
 
+### 1.0.9
+
+- Added `Rerun Test` and `Rerun Suite` commands for Test Explorer and Test Results views context menus.
+- minor fixes for improvement
+
 ### 1.0.8
 
 - Bug fix: corrected navigation from Test Results view to tests.
