@@ -430,73 +430,113 @@ function loadAblUnitResults(controller, xmlPath, run) {
     controller.items.replace([]);
 
     const xml = parseResultsXml(xmlPath);
-    const testSuites = xml.getElementsByTagName("testsuite");
-
-    // Use the same workspace-root logic as loadOpenEdgeProjectConfig
     const xmlWorkspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(xmlPath));
     const baseWorkspacePath = xmlWorkspaceFolder ? xmlWorkspaceFolder.uri.fsPath : path.dirname(xmlPath);
 
-    for (let i = 0; i < testSuites.length; i++) {
-        const suiteNode = testSuites[i];
-
-        const suiteName = suiteNode.getAttribute("classname") || "UnnamedSuite";
+    function addSuiteRecursive(suiteNode, parentItem) {
+        const suiteName = suiteNode.getAttribute("classname") || suiteNode.getAttribute("name") || "UnnamedSuite";
         const suiteFile = suiteNode.getAttribute("name") || "";
-        const suiteId = suiteNode.getAttribute("id") || "";
+        const suiteId = suiteNode.getAttribute("id") || Math.random().toString(36).substr(2, 9);
         const suitePath = path.isAbsolute(suiteFile) ? suiteFile : path.join(baseWorkspacePath, suiteFile);
         const suiteUri = vscode.Uri.file(suitePath);
-        
-        // ---- Create Suite TestItem ----
         const suiteItem = controller.createTestItem(suiteId, suiteName, suiteUri);
-        controller.items.add(suiteItem);
+        suiteItem.contextValue = "ablunitSuite";
+        if (parentItem) {
+            parentItem.children.add(suiteItem);
+        } else {
+            controller.items.add(suiteItem);
+        }
 
-        // Parse test cases inside this suite
-        //const testCaseNodes = suiteNode.getElementsByTagName("testcase");
+        // Add nested suites recursively
+        const nestedSuites = getDirectChildrenByTag(suiteNode, "testsuite");
+        for (let i = 0; i < nestedSuites.length; i++) {
+            addSuiteRecursive(nestedSuites[i], suiteItem);
+        }
+
+        // Add test cases
         const testCaseNodes = getDirectChildrenByTag(suiteNode, "testcase");
-
         for (let j = 0; j < testCaseNodes.length; j++) {
-
             const testNode = testCaseNodes[j];
-            const suiteFile = suiteNode.getAttribute("name") || "";
             const testName = testNode.getAttribute("name") || "UnnamedTest";
-            // Prefer the real file path provided by the suite for the test's URI
-            const testFile = suiteFile;
             const testTime = testNode.getAttribute('time') || '0.000';
             const testStatus = testNode.getAttribute("status");
-
+            const testFile = suiteFile;
             const testPath = path.isAbsolute(testFile) ? testFile : path.join(baseWorkspacePath, testFile);
             const uri = vscode.Uri.file(testPath);
-
             const range = findAblTestRange(uri.fsPath, testName);
-
-            // ---- Create Test Item ----
             const testId = `${suiteId}:${testName}`;
-
             const testItem = controller.createTestItem(testId, testName + ' (' + testTime + ')', uri);
-
-            // Let VS Code highlight the test location
-            testItem.range = range;
-
-            // Attach to suite node
+            testItem.contextValue = "ablunitTest";
+                testItem.range = range;
+                console.log(`[ABLUnitRunner] Set range for testItem ${testItem.id}:`, range);
             suiteItem.children.add(testItem);
-
-            // ---- Parse Results ----
-
             if (testStatus === "Success") {
                 testItem.busy = false;
                 testItem.error = undefined;
                 run.passed(testItem);
             } else if (testStatus === "Error" || testStatus === "Failure") {
-                 
                 const errorNode = testNode.getElementsByTagName(testStatus.toLowerCase())[0];
-                const errorMessage = errorNode.getAttribute("message")  || "Test failed";
-                const errorType = errorNode.getAttribute("type") || "Unknown error";
-                
-                testItem.error = new vscode.TestMessage(errorMessage) ;
-                testItem.error.location = new vscode.Location(uri, range);
-                run.failed(testItem, new vscode.TestMessage(errorType + " : " + errorMessage + "\n" + errorNode.childNodes[0]));
+                let errorMessage = "";
+                let errorType = "Unknown error";
+                let fullErrorText = "";
+                if (errorNode) {
+                    errorMessage = errorNode.getAttribute("message") || "";
+                    errorType = errorNode.getAttribute("type") || "Unknown error";
+                    if (errorNode.childNodes && errorNode.childNodes.length > 0) {
+                        fullErrorText = errorNode.childNodes[0].nodeValue || "";
+                    }
+                }
+                const displayMessage = errorMessage && errorMessage.trim() ? errorMessage : (errorType && errorType.trim() ? errorType : "Test failed");
+                testItem.error = displayMessage;
+                const fullErrorDetails = fullErrorText && fullErrorText.trim() ? fullErrorText : displayMessage;
 
+                // Improved: Find the line in the error text that contains the test method name, extract the line number from that line
+                let errorLine = null;
+                if (fullErrorText && testName) {
+                    const lines = fullErrorText.split(/\r?\n/);
+                    for (const line of lines) {
+                        if (line.includes(testName)) {
+                            const match = /line\s+(\d+)/i.exec(line);
+                            if (match && match[1]) {
+                                errorLine = parseInt(match[1], 10) - 1; // VSCode lines are 0-based
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Fallback: try to extract from errorMessage or anywhere in fullErrorText
+                if (errorLine === null) {
+                    const lineMatch = /line\s+(\d+)/i.exec(errorMessage) || /line\s+(\d+)/i.exec(fullErrorText);
+                    if (lineMatch && lineMatch[1]) {
+                        errorLine = parseInt(lineMatch[1], 10) - 1;
+                    }
+                }
+                // Only use the error line for the error marker, not for navigation
+                let errorRange = null;
+                if (errorLine !== null && !isNaN(errorLine)) {
+                    errorRange = new vscode.Range(errorLine, 0, errorLine, 1000);
+                }
+                const testMsg = new vscode.TestMessage(errorType + ": " + displayMessage + "\n" + fullErrorDetails);
+                if (errorRange) {
+                    testMsg.location = new vscode.Location(uri, errorRange);
+                }
+                run.failed(testItem, [testMsg]);
             }
+        }
+    }
 
+    // Start recursion for all top-level suites (direct children of <testsuites>)
+    const testsuitesRoot = xml.getElementsByTagName("testsuites")[0];
+    if (testsuitesRoot) {
+        const topSuites = getDirectChildrenByTag(testsuitesRoot, "testsuite");
+        for (let i = 0; i < topSuites.length; i++) {
+            addSuiteRecursive(topSuites[i], null);
+        }
+    } else {
+        // Fallback: if no <testsuites> root, treat all <testsuite> as top-level
+        const testSuites = xml.getElementsByTagName("testsuite");
+        for (let i = 0; i < testSuites.length; i++) {
+            addSuiteRecursive(testSuites[i], null);
         }
     }
     outputChannel.appendLine(`Done loading AblUnit results.`);    
@@ -509,12 +549,36 @@ function loadAblUnitResults(controller, xmlPath, run) {
  */
 function activate(context) {
 
+    // Navigate to test method in editor when a test is selected in the Test Explorer
+    if (vscode.tests.onDidChangeTestSelection) {
+        const testSelectionDisposable = vscode.tests.onDidChangeTestSelection(e => {
+            if (!e.selected || e.selected.length !== 1) return;
+            const testItem = e.selected[0];
+            if (testItem.uri && testItem.range) {
+                vscode.window.showTextDocument(testItem.uri, { selection: testItem.range, preview: true });
+            }
+        });
+        context.subscriptions.push(testSelectionDisposable);
+    }
+
 	// Use the console to output diagnostic information (console.>log) and errors (console.error)
 	// This line of code will only be executed once when your extension is activated
 	console.log('Congratulations, your extension ABLUnit Runner is now active!');
 
 	const controller = vscode.tests.createTestController('ablunitController', 'ABLUnit Tests');
     context.subscriptions.push(controller);
+
+    // Register handler for running tests (via CodeLens, Test Results view, etc.)
+    controller.runHandler = async (request) => {
+        const tests = request.include || [];
+        for (const test of tests) {
+            // Extract test name from test ID (format: "suiteId:testName")
+            const testName = test.id.includes(':') ? test.id.split(':')[1] : undefined;
+            // Run the test using the existing command
+            await vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', test.uri, testName);
+        }
+    };
+
 
 	// Internal helper: read the project's `results.xml` (optionally from a supplied project folder) and load it into the test controller
 	function readResultsXml(outputFolder) {

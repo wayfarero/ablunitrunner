@@ -2,7 +2,7 @@
   "name": "ablunitrunner",
   "displayName": "ABLUnit Runner",
   "description": "A VSCode extension designed for running ABLUnit tests without any time limits",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "publisher": "wayfare",
   "icon": "resources/logo.png",
   "homepage": "https://github.com/wayfarero/ablunitrunner/blob/main/README.md",
@@ -67,11 +67,12 @@
       "testing/item/context": [
         {
           "command": "ABLUnitRunner.RunABLUnitOnTestItem",
-          "when": "testId =~ /:/",
+          "when": "viewItem == ablunitTest",
           "group": "navigation"
         },
         {
           "command": "ABLUnitRunner.RunABLUnitOnTestSuite",
+          "when": "viewItem == ablunitSuite",
           "group": "navigation"
         }
       ],
