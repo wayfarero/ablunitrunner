@@ -24,7 +24,15 @@
 ### ABLUnit Runner Explorer Context Menu
 ![Explorer context](https://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/explorer.gif)
 
+### ABLUnit Runner Test Explorer Context Menu
+![Testing context](https://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/testexplorer.gif)
+
 ## Release Notes
+
+### 1.0.11
+
+- bug fix `Rerun Test` and `Rerun Suite` commands for Test Explorer.
+- updated demo gifs
 
 ### 1.0.10
 

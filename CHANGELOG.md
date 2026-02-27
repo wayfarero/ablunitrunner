@@ -1,10 +1,14 @@
+### 1.0.11
+
+- bug fix `Rerun Test` and `Rerun Suite` commands for Test Explorer.
+- updated demo gifs
+
 ## 1.0.10
 
 - Improved error highlighting for failed tests:
   - Error markers now reliably appear at the affected line if available.
   - If no error line is found, the marker falls back to the test method header, ensuring visibility in the editor.
   - Fixes for robust error navigation and display in the Test Explorer.
-
 
 ## 1.0.9
 
