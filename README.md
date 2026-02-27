@@ -1,10 +1,4 @@
-### 1.0.10
-
-- Improved error highlighting for failed tests:
-  - Error markers now reliably appear at the affected line if available.
-  - If no error line is found, the marker falls back to the test method header, ensuring visibility in the editor.
-  - Fixes for robust error navigation and display in the Test Explorer.
-# ABLUnit Runner README
+# ABLUnit Runner
   
   A VS Code extension that executes a batch script to initiate [ABLUnit](https://docs.progress.com/bundle/openedge-developer-studio-help/page/Learn-About-ABLUnit-Test-Framework.html) test runs and subsequently parses and imports the results into the VS Code Test Results view. The extension is optimized for executing long-running and large-scale unit test suites.
 
@@ -31,6 +25,13 @@
 ![Explorer context](https://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/explorer.gif)
 
 ## Release Notes
+
+### 1.0.10
+
+- Improved error highlighting for failed tests:
+  - Error markers now reliably appear at the affected line if available.
+  - If no error line is found, the marker falls back to the test method header, ensuring visibility in the editor.
+  - Fixes for robust error navigation and display in the Test Explorer.
 
 ### 1.0.9
 
