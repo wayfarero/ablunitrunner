@@ -1,3 +1,8 @@
+### 1.0.12
+
+- Bug Fixed `.metadata` folder detection for projects with multiple source entries in `.propath` files. The extension now correctly resolves test file paths when `.propath` defines multiple source directories
+- Code refactoring to improve code maintainability 
+
 ### 1.0.11
 
 - bug fix `Rerun Test` and `Rerun Suite` commands for Test Explorer.

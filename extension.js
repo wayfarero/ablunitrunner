@@ -140,6 +140,33 @@ function findProjectRoot(startDir) {
     return null;
 }
 
+/**
+ * Find the .metadata folder by walking up from the starting directory.
+ * @param {string} startDir
+ * @returns {string|null}
+ */
+function findMetadataRoot(startDir) {
+    let currentDir = startDir;
+    const fsRoot = path.parse(startDir).root;
+    
+    // Walk up the directory tree looking for .metadata
+    while (currentDir !== fsRoot) {
+        const metadataDir = path.join(currentDir, '.metadata');
+        if (fs.existsSync(metadataDir)) {
+            return currentDir;
+        }
+        currentDir = path.dirname(currentDir);
+    }
+    
+    // Check the root directory itself
+    const metadataDir = path.join(currentDir, '.metadata');
+    if (fs.existsSync(metadataDir)) {
+        return currentDir;
+    }
+    
+    return null;
+}
+
 
 
 
@@ -257,9 +284,16 @@ function loadOpenEdgeProjectConfig(filePath) {
     }
 
     let metadataRoot;
-    if (vscode.workspace.workspaceFile) {
+    // First, try to find .metadata folder starting from the project root
+    if (oeProjectRoot) {
+        metadataRoot = findMetadataRoot(oeProjectRoot);
+    }
+    // Fallback to workspace file directory if no .metadata found
+    if (!metadataRoot && vscode.workspace.workspaceFile) {
         metadataRoot = path.dirname(vscode.workspace.workspaceFile.fsPath);
-    } else {
+    }
+    // Final fallback to workspace root
+    if (!metadataRoot) {
         metadataRoot = workspaceRoot;
     }
 
@@ -416,9 +450,11 @@ function executeCommandString(commandString, filePath, onCloseCommand) {
 /**
  * @param {vscode.TestController} controller
  * @param {string} xmlPath
- * @param {vscode.TestRun} xmlPath
+ * @param {vscode.TestRun} run
+ * @param {string} [baseWorkspacePath] - Override the base workspace path for resolving test file paths
+ * @param {Object} [projectCfg] - Project configuration for source path resolution
  */
-function loadAblUnitResults(controller, xmlPath, run) {
+function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, projectCfg) {
 
     const outputChannel = getAblUnitOutputChannel();
     outputChannel.appendLine(`Start loading AblUnit results..`);    
@@ -430,14 +466,56 @@ function loadAblUnitResults(controller, xmlPath, run) {
     controller.items.replace([]);
 
     const xml = parseResultsXml(xmlPath);
-    const xmlWorkspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(xmlPath));
-    const baseWorkspacePath = xmlWorkspaceFolder ? xmlWorkspaceFolder.uri.fsPath : path.dirname(xmlPath);
+
+    // Use provided baseWorkspacePath, or fallback to workspace folder detection or directory of xmlPath
+    if (!baseWorkspacePath) {
+        const xmlWorkspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(xmlPath));
+        baseWorkspacePath = xmlWorkspaceFolder ? xmlWorkspaceFolder.uri.fsPath : path.dirname(xmlPath);
+    }
+
+    // Extract source paths from project config
+    const sourcePaths = projectCfg && Array.isArray(projectCfg.buildPath)
+        ? projectCfg.buildPath
+            .filter(p => p.type === 'source' && p.path)
+            .map(p => {
+                let pth = p.path.replace(/\\\//g, '/');
+                // Remove leading './' if it exists and path is not just '.'
+                if (pth.startsWith('./') && pth.length > 1) {
+                    pth = pth.substring(2);
+                } else if (pth === '.') {
+                    pth = '';
+                }
+                return pth;
+            })
+        : [];
+    
+    // Sort by longest path first to match the most specific path
+    sourcePaths.sort((a, b) => b.length - a.length);
 
     function addSuiteRecursive(suiteNode, parentItem) {
         const suiteName = suiteNode.getAttribute("classname") || suiteNode.getAttribute("name") || "UnnamedSuite";
         const suiteFile = suiteNode.getAttribute("name") || "";
         const suiteId = suiteNode.getAttribute("id") || Math.random().toString(36).substr(2, 9);
-        const suitePath = path.isAbsolute(suiteFile) ? suiteFile : path.join(baseWorkspacePath, suiteFile);
+        
+        // Try to find the correct path by checking source paths first
+        let suitePath = null;
+        if (path.isAbsolute(suiteFile)) {
+            suitePath = suiteFile;
+        } else {
+            // Try each source path to see which one exists
+            for (const sourcePath of sourcePaths) {
+                const candidatePath = path.join(baseWorkspacePath, sourcePath, suiteFile);
+                if (fs.existsSync(candidatePath)) {
+                    suitePath = candidatePath;
+                    break;
+                }
+            }
+            // Fallback: try without source path
+            if (!suitePath) {
+                suitePath = path.join(baseWorkspacePath, suiteFile);
+            }
+        }
+        
         const suiteUri = vscode.Uri.file(suitePath);
         const suiteItem = controller.createTestItem(suiteId, suiteName, suiteUri);
         suiteItem.contextValue = "ablunitSuite";
@@ -461,14 +539,32 @@ function loadAblUnitResults(controller, xmlPath, run) {
             const testTime = testNode.getAttribute('time') || '0.000';
             const testStatus = testNode.getAttribute("status");
             const testFile = suiteFile;
-            const testPath = path.isAbsolute(testFile) ? testFile : path.join(baseWorkspacePath, testFile);
+            
+            // Try to find the correct path by checking source paths first
+            let testPath = null;
+            if (path.isAbsolute(testFile)) {
+                testPath = testFile;
+            } else {
+                // Try each source path to see which one exists
+                for (const sourcePath of sourcePaths) {
+                    const candidatePath = path.join(baseWorkspacePath, sourcePath, testFile);
+                    if (fs.existsSync(candidatePath)) {
+                        testPath = candidatePath;
+                        break;
+                    }
+                }
+                // Fallback: try without source path
+                if (!testPath) {
+                    testPath = path.join(baseWorkspacePath, testFile);
+                }
+            }
+            
             const uri = vscode.Uri.file(testPath);
             const range = findAblTestRange(uri.fsPath, testName);
             const testId = `${suiteId}:${testName}`;
             const testItem = controller.createTestItem(testId, testName + ' (' + testTime + ')', uri);
             testItem.contextValue = "ablunitTest";
                 testItem.range = range;
-                console.log(`[ABLUnitRunner] Set range for testItem ${testItem.id}:`, range);
             suiteItem.children.add(testItem);
             if (testStatus === "Success") {
                 testItem.busy = false;
@@ -581,7 +677,7 @@ function activate(context) {
 
 
 	// Internal helper: read the project's `results.xml` (optionally from a supplied project folder) and load it into the test controller
-	function readResultsXml(outputFolder) {
+	function readResultsXml(outputFolder, baseWorkspacePath, projectCfg) {
 		//vscode.window.showInformationMessage('Refreshing ABLUnit results...');
 
 		let resultsFile;
@@ -603,7 +699,7 @@ function activate(context) {
 		
 		const run = controller.createTestRun(new vscode.TestRunRequest());
 
-		loadAblUnitResults(controller, resultsFile, run);
+		loadAblUnitResults(controller, resultsFile, run, baseWorkspacePath, projectCfg);
 
 		run.end();
 
@@ -727,7 +823,8 @@ function activate(context) {
             (dlcEnv ? ` --dlc "${dlcEnv}"` : '');
 
         // Execute the prepared command in the workspace folder and run the internal refresh when it finishes
-        executeCommandString(commandString, workdir, readResultsXml.bind(null, outputFolder));
+        // Pass the workdir as the baseWorkspacePath and projectCfg for correct file path resolution
+        executeCommandString(commandString, workdir, readResultsXml.bind(null, outputFolder, workdir, projectCfg));
     });
 
     const runABLUnitOnTestItem = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnTestItem', function (testItemOrItems) {
