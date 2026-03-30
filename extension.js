@@ -301,7 +301,7 @@ function loadOpenEdgeProjectConfig(filePath) {
     const dbConnFilterPath = path.join(oeProjectRoot, '.dbconnection');
     
     if (!cfg.dbConnections && fs.existsSync(dbConnXmlPath)) {
-        vscode.window.showInformationMessage("databaseConnection.xml exists: " + dbConnXmlPath);
+        //vscode.window.showInformationMessage("databaseConnection.xml exists: " + dbConnXmlPath);
         try {
             let activeIds = null;
             if (fs.existsSync(dbConnFilterPath)) {
@@ -665,15 +665,21 @@ function activate(context) {
     context.subscriptions.push(controller);
 
     // Register handler for running tests (via CodeLens, Test Results view, etc.)
-    controller.runHandler = async (request) => {
-        const tests = request.include || [];
-        for (const test of tests) {
-            // Extract test name from test ID (format: "suiteId:testName")
-            const testName = test.id.includes(':') ? test.id.split(':')[1] : undefined;
-            // Run the test using the existing command
-            await vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', test.uri, testName);
-        }
-    };
+    const runProfile = controller.createRunProfile(
+        'Run ABLUnit Tests',
+        vscode.TestRunProfileKind.Run,
+        async (request) => {
+            const tests = request.include || [];
+            for (const test of tests) {
+                // Extract test name from test ID (format: "suiteId:testName")
+                const testName = test.id.includes(':') ? test.id.split(':')[1] : undefined;
+                // Run the test using the existing command
+                await vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', test.uri, testName);
+            }
+        },
+        true // isDefault
+    );
+    context.subscriptions.push(runProfile);
 
 
 	// Internal helper: read the project's `results.xml` (optionally from a supplied project folder) and load it into the test controller

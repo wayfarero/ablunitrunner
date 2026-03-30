@@ -2,7 +2,7 @@
   "name": "ablunitrunner",
   "displayName": "ABLUnit Runner",
   "description": "A VSCode extension designed for running ABLUnit tests without any time limits",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "publisher": "wayfare",
   "icon": "resources/logo.png",
   "homepage": "https://github.com/wayfarero/ablunitrunner/blob/main/README.md",
@@ -86,18 +86,9 @@
       ]
     }
   },
-  "scripts": {
-    "lint": "eslint .",
-    "pretest": "npm run lint",
-    "test": "vscode-test"
-  },
   "devDependencies": {
-    "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "@types/vscode": "^1.107.0",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2",
-    "eslint": "^9.39.1"
+    "@types/vscode": "^1.107.0"
   },
   "dependencies": {
     "xmldom": "^0.6.0"
