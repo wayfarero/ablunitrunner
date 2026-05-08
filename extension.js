@@ -15,6 +15,55 @@ function getAblUnitOutputChannel() {
     return ablUnitOutputChannel;
 }
 
+/**
+ * Show a status bar spinner while an ABLUnit process is running.
+ * Returns a cleanup function that stops updates and disposes the item.
+ *
+ * @returns {(finalText?: string) => void}
+ */
+function startAblUnitRunStatus() {
+    const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    const startedAt = Date.now();
+    let pid = null;
+
+    const update = () => {
+        const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
+        const pidPart = pid !== null ? ` [PID ${pid}]` : '';
+        item.text = `$(sync~spin) ABLUnit Running ${elapsedSec}s${pidPart}`;
+        item.tooltip = `ABLUnit run in progress (${elapsedSec}s)${pidPart}`;
+    };
+
+    update();
+    item.show();
+
+    const timer = setInterval(update, 1000);
+    let stopped = false;
+
+    const stop = (finalText) => {
+        if (stopped) return;
+        stopped = true;
+        clearInterval(timer);
+
+        if (finalText) {
+            const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
+            const textWithTime = `${finalText} (${elapsedSec}s)`;
+            item.text = textWithTime;
+            item.tooltip = textWithTime;
+            setTimeout(() => item.dispose(), 2500);
+            return;
+        }
+
+        item.dispose();
+    };
+
+    const setPid = (newPid) => {
+        pid = newPid;
+        update();
+    };
+
+    return { stop, setPid };
+}
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 
@@ -408,20 +457,25 @@ function executeCommandString(commandString, filePath, onCloseCommand) {
     try {
         const workspaceFolderPath = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath || process.cwd();
         const outputChannel = getAblUnitOutputChannel();
+        const runStatus = startAblUnitRunStatus();
         outputChannel.show(true);
         outputChannel.appendLine(`Executing: ${commandString}`);
 
         const proc = spawn(commandString, { shell: true, cwd: workspaceFolderPath, env: process.env });
+        outputChannel.appendLine(`Started process with PID ${proc.pid}`);
+        runStatus.setPid(proc.pid);
 
         proc.stdout.on('data', (data) => outputChannel.append(data.toString()));
         proc.stderr.on('data', (data) => outputChannel.append(data.toString()));
 
         proc.on('error', (err) => {
+            runStatus.stop('$(error) ABLUnit failed');
             outputChannel.appendLine(`Failed to start process: ${err.message}`);
             vscode.window.showErrorMessage(`Failed to run ABLUnit: ${err.message}`);
         });
 
         proc.on('close', (code) => {
+            runStatus.stop(code === 0 ? '$(check) ABLUnit done' : `$(error) ABLUnit failed (${code})`);
             outputChannel.appendLine(`Process exited with code ${code}`);
             const msg = code === 0 ? 'Run completed successfully' : `Run completed with exit code ${code}`;
             vscode.window.showInformationMessage(msg);

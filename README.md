@@ -29,6 +29,10 @@
 
 ## Release Notes
 
+### 1.0.14
+ 
+ -**Improvment:** Added ABLUnit Runner status bar animation and PID information for the current ABLUnit Runner session
+
 ### 1.0.13
  
  -**Bug Fix:** Corrected editor failed test bullet click event to rerun test
