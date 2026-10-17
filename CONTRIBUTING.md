@@ -10,6 +10,35 @@ All contributions are subject to the Developer Certificate of Origin and license
 
 _This notice should stay as the first item in the CONTRIBUTING.md file._
 
+## Contributing
+
+We welcome contributions to this project. Here's how you can help:
+
+### Reporting Issues
+Please create an issue with enough detail information to help us understand and reproduce the problem. Include:
+- A clear description of the issue
+- Steps to reproduce (if applicable)
+- Expected vs. actual behavior
+- Any relevant environment details
+
+### Proposing Changes
+If you'd like to propose a change or improvement:
+1. Create an issue to discuss your proposal first
+2. Fork the repository
+3. Create a new branch for your changes
+4. Make your modifications
+5. Submit a Pull Request with a clear description of what you've changed and why
+
+**Please ensure your changes are relevant and as minimal as possible** - avoid unrelated modifications and focus on solving the specific issue at hand.
+
+### Pull Requests
+All contributions are submitted via Pull Requests. When creating a PR:
+- Provide a clear title and description
+- Reference any related issues
+- Ensure your changes are tested
+
+---
+
 ## Code of conduct
 
 As contributors and maintainers of this project, we pledge to respect all people
