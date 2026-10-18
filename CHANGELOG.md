@@ -1,3 +1,10 @@
+## 1.0.16
+
+- **Improvements:** 
+  - Ensured DLC resolution falls back to the OpenEdge ABL VSCode runtime configuration and then the environment variable when project settings are missing.
+  - Expanded command logging now shows the resolved DLC path in the runtime command for easier debugging.
+  - Improved Windows/Linux runner compatibility and configuration handling for DLC and PROPATH expansion.
+
 ## 1.0.15
 
   -**Improvment:** Added linux support, updated contributing.md

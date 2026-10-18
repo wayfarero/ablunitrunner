@@ -417,6 +417,45 @@ function loadOpenEdgeProjectConfig(filePath) {
  * @param {Object} projectCfg
  * @returns {string}
  */
+function resolveDlcFromOpenEdgeProject(projectCfg) {
+    if (!projectCfg || typeof projectCfg !== 'object') {
+        return undefined;
+    }
+
+    const projectOeVersion = projectCfg.oeversion || projectCfg.oeVersion;
+    const runtimeConfig = projectCfg?.abl?.configuration?.runtimes;
+    const runtimeEntries = Array.isArray(runtimeConfig)
+        ? runtimeConfig
+        : runtimeConfig && typeof runtimeConfig === 'object'
+            ? Object.values(runtimeConfig)
+            : [];
+
+    const byVersion = runtimeEntries.filter((runtime) => {
+        if (!runtime || typeof runtime !== 'object') return false;
+        const runtimeVersion = runtime.oeversion || runtime.oeVersion || runtime.version;
+        if (!runtimeVersion) return false;
+        return !projectOeVersion || String(runtimeVersion) === String(projectOeVersion);
+    });
+
+    const match = byVersion.find((runtime) => runtime.dlc || runtime.DLC || runtime.path || runtime.location || runtime.installPath)
+        || runtimeEntries.find((runtime) => runtime && typeof runtime === 'object' && (runtime.dlc || runtime.DLC || runtime.path || runtime.location || runtime.installPath))
+        || undefined;
+
+    if (!match) {
+        return projectCfg.dlc || projectCfg.DLC || undefined;
+    }
+
+    return match.dlc || match.DLC || match.path || match.location || match.installPath || undefined;
+}
+
+function normalizeDlcPlaceholders(value) {
+    if (!value) {
+        return value;
+    }
+
+    return value.replace(/@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}|%[Dd][Ll][Cc]%/g, '%DLC%');
+}
+
 function buildPropathStr(projectCfg) {
     const collected = [];
 
@@ -425,8 +464,7 @@ function buildPropathStr(projectCfg) {
         for (const entry of projectCfg.buildPath) {
             if (entry && entry.path) {
                 let s = entry.path.replace(/\\\//g, '/');
-                // Replace @{DLC}, ${DLC}, @{dlc}, ${dlc} with %DLC%
-                s = s.replace(/@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}/g, '%DLC%');
+                s = normalizeDlcPlaceholders(s);
                 collected.push(s);
             }
         }
@@ -453,13 +491,25 @@ function buildPropathStr(projectCfg) {
  * @param {string} filePath
  * @param {function|undefined} [onCloseCommand]
  */
-function executeCommandString(commandString, filePath, onCloseCommand) {
+function expandDlcPlaceholders(value, dlcPath) {
+    if (!value || !dlcPath) {
+        return value;
+    }
+
+    const normalizedDlc = dlcPath.replace(/\\/g, '/');
+    return value
+        .replace(/@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}|%[Dd][Ll][Cc]%/g, normalizedDlc)
+        .replace(/\//g, '\\');
+}
+
+function executeCommandString(commandString, filePath, onCloseCommand, resolvedDlc) {
     try {
         const workspaceFolderPath = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath || process.cwd();
         const outputChannel = getAblUnitOutputChannel();
         const runStatus = startAblUnitRunStatus();
         outputChannel.show(true);
-        outputChannel.appendLine(`Executing: ${commandString}`);
+        const displayCommandString = resolvedDlc ? expandDlcPlaceholders(commandString, resolvedDlc) : commandString;
+        outputChannel.appendLine(`Executing: ${displayCommandString}`);
 
         const proc = spawn(commandString, { shell: true, cwd: workspaceFolderPath, env: process.env });
         outputChannel.appendLine(`Started process with PID ${proc.pid}`);
@@ -787,21 +837,37 @@ function activate(context) {
         // Load configuration if found (delegated to helper)
         projectCfg = loadOpenEdgeProjectConfig(filePath);
 
-        // Read DLC environment variable if present
+        // Read DLC from the OpenEdge ABL project config when available, using the
+        // runtime entry that matches the project's oeversion. Fall back to the
+        // environment variable when the Riverside project config is absent or incomplete.
         const dlcEnv = process.env.DLC || process.env.dlc;
-        // If the project references ${DLC} (or %DLC%), require the DLC env var to be set
-        if (!dlcEnv) {
+        const projectDlc = resolveDlcFromOpenEdgeProject(projectCfg);
+        const hasRiversideProjectConfig = !!(projectCfg && (
+            projectCfg.oeversion ||
+            projectCfg.oeVersion ||
+            (projectCfg.abl && projectCfg.abl.configuration && projectCfg.abl.configuration.runtimes) ||
+            (Array.isArray(projectCfg.buildPath) && projectCfg.buildPath.length > 0) ||
+            (Array.isArray(projectCfg.dbConnections) && projectCfg.dbConnections.length > 0) ||
+            projectCfg.extraParameters ||
+            projectCfg.propath
+        ));
+        const effectiveDlc = projectDlc || dlcEnv || (projectCfg && projectCfg.dlc);
+        if (!effectiveDlc) {
             vscode.window.showErrorMessage('Environment variable DLC is not set. Set DLC to your OpenEdge installation path and restart VS Code.');
             return;
         }
+
+        const fallbackProjectCfg = !hasRiversideProjectConfig && effectiveDlc
+            ? { ...projectCfg, buildPath: [{ type: 'propath', path: effectiveDlc }] }
+            : projectCfg;
 
         // Extract fields and build pieces
         const isWindows = process.platform === 'win32';
         const runner = path.join(context.extensionPath, 'resources', 'scripts', isWindows ? 'run_ABLUNIT.bat' : 'run_ABLUNIT.sh');
         const runnerCommand = isWindows ? `"${runner}"` : `sh "${runner}"`;
-        const extraParams = projectCfg.extraParameters || '';
-        const propathStr = buildPropathStr(projectCfg);
-        const dbConnectStr = getDbConnectsSpaceSeparated(projectCfg);
+        const extraParams = fallbackProjectCfg.extraParameters || '';
+        const propathStr = buildPropathStr(fallbackProjectCfg);
+        const dbConnectStr = getDbConnectsSpaceSeparated(fallbackProjectCfg);
 
 
         // Split filePath into workspace folder and relative path
@@ -882,11 +948,12 @@ function activate(context) {
 
         const commandString = `${runnerCommand} --workdir "${workdir}" --testfile "${testFileArg}"` +
             (propathStr ? ` --propath "${propathStr}"` : '') +
-            (dlcEnv ? ` --dlc "${dlcEnv}"` : '');
+            (effectiveDlc ? ` --dlc "${effectiveDlc}"` : '');
 
-        // Execute the prepared command in the workspace folder and run the internal refresh when it finishes
-        // Pass the workdir as the baseWorkspacePath and projectCfg for correct file path resolution
-        executeCommandString(commandString, workdir, readResultsXml.bind(null, outputFolder, workdir, projectCfg));
+        // Execute the prepared command in the workspace folder and run the internal refresh when it finishes.
+        // Log the fully expanded DLC path for readability while still passing the original command string
+        // to the shell so Windows can resolve %DLC% expansions during execution.
+        executeCommandString(commandString, workdir, readResultsXml.bind(null, outputFolder, workdir, fallbackProjectCfg), effectiveDlc);
     });
 
     const runABLUnitOnTestItem = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnTestItem', function (testItemOrItems) {
