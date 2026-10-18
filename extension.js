@@ -791,12 +791,14 @@ function activate(context) {
         const dlcEnv = process.env.DLC || process.env.dlc;
         // If the project references ${DLC} (or %DLC%), require the DLC env var to be set
         if (!dlcEnv) {
-            vscode.window.showErrorMessage('Environment variable DLC is not set. Please set %DLC% to your OpenEdge installation path and restart VS Code.');
+            vscode.window.showErrorMessage('Environment variable DLC is not set. Set DLC to your OpenEdge installation path and restart VS Code.');
             return;
         }
 
         // Extract fields and build pieces
-        const runner = path.join( context.extensionPath, 'resources', 'scripts', 'run_ABLUNIT.bat' );
+        const isWindows = process.platform === 'win32';
+        const runner = path.join(context.extensionPath, 'resources', 'scripts', isWindows ? 'run_ABLUNIT.bat' : 'run_ABLUNIT.sh');
+        const runnerCommand = isWindows ? `"${runner}"` : `sh "${runner}"`;
         const extraParams = projectCfg.extraParameters || '';
         const propathStr = buildPropathStr(projectCfg);
         const dbConnectStr = getDbConnectsSpaceSeparated(projectCfg);
@@ -878,7 +880,7 @@ function activate(context) {
             : '';
         const testFileArg = resolvedTestName ? `${relPath}#${resolvedTestName}` : relPath;
 
-        const commandString = `${runner} --workdir "${workdir}" --testfile "${testFileArg}"` +
+        const commandString = `${runnerCommand} --workdir "${workdir}" --testfile "${testFileArg}"` +
             (propathStr ? ` --propath "${propathStr}"` : '') +
             (dlcEnv ? ` --dlc "${dlcEnv}"` : '');
 

@@ -1,3 +1,7 @@
+## 1.0.15
+
+  -**Improvment:** Added linux support, updated contributing.md
+
 ## 1.0.14
  
  -**Improvment:** Added ABLUnit Runner status bar animation and PID information for the current ABLUnit Runner session

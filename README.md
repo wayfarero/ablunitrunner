@@ -17,6 +17,7 @@
 
 **Example:**
 - **Windows:** `DLC=C:\Progress\OpenEdge`
+- **Linux:** `DLC=/usr/dlc`
 
 ### ABLUnit Runner Editor Context Menu
 ![Editor context](https://github.com/wayfarero/ablunitrunner/raw/main/resources/demo/editor.gif)
@@ -29,86 +30,11 @@
 
 ## Release Notes
 
-### 1.0.14
+### 1.0.15
  
- -**Improvment:** Added ABLUnit Runner status bar animation and PID information for the current ABLUnit Runner session
+ -**Improvment:** Added linux support, updated contributing.md
 
-### 1.0.13
- 
- -**Bug Fix:** Corrected editor failed test bullet click event to rerun test
- - Cleaned up obsolete package dependecies 
-
-### 1.0.12
-
-- **Bug Fix:** Fixed `.metadata` folder detection for projects with multiple source entries in `.propath` files. The extension now correctly resolves test file paths when `.propath` defines multiple source directories (e.g., `Tests`, `src`) in multi-project workspaces.
-- **Code Refactoring:** Extracted reusable utility functions for path normalization and source path resolution to improve code maintainability and reduce duplication.
-
-### 1.0.11
-
-- bug fix `Rerun Test` and `Rerun Suite` commands for Test Explorer.
-- updated demo gifs
-
-### 1.0.10
-
-- Improved error highlighting for failed tests:
-  - Error markers now reliably appear at the affected line if available.
-  - If no error line is found, the marker falls back to the test method header, ensuring visibility in the editor.
-  - Fixes for robust error navigation and display in the Test Explorer.
-
-### 1.0.9
-
-- Added `Rerun Test` and `Rerun Suite` commands for Test Explorer and Test Results views context menus.
-- minor fixes for improvement
-
-### 1.0.8
-
-- Bug fix: corrected navigation from Test Results view to tests.
-
-### 1.0.7
-
-- Ensures a clean slate before every run:
-  - Deletes `.ablunitrunner/results.xml` at command start.
-  - Clears and refreshes the VS Code Testing view so stale results aren’t displayed prior to loading new results.
-
-### 1.0.6
-
-- Fixed README demo GIF links so they display correctly.
-
-### 1.0.5
-
-- Updated README.md, CHANGELOG.md and package.json.
-- Removed obsolete/unnecessary files.
-
-### 1.0.4
-
-- **Native OpenEdge Developer Studio Workspace Support:**
-  - The extension now automatically discovers and uses configurations from native OpenEdge Developer Studio projects.
-  - **PROPATH Recognition:**
-    - It correctly parses `.propath` files to build the full propath for the test execution.
-    - It robustly finds the project root, making it compatible with multi-root and nested project structures.
-    - It handles various path formats, including `@{ROOT}` and paths starting with `\`.
-  - **Database Connection Discovery:**
-    - It automatically reads database connection details from the workspace's central `databaseConnection.xml` file.
-    - It uses the project-specific `.dbconnection` file to load only the database connections that are relevant to the project being tested.
-- General bug fixes and stability improvements.
-
-### 1.0.3
-- Repository url updated in package.json
-
-### 1.0.2
-
-- Improved robustness when running tests for the first time in a new workspace.
-- Added support for OpenEdge Developer Studio project folders (which use a `.propath` file for propath configuration when `openedge-project.json` is absent).
-- General bug fixes and stability improvements.
-
-### 1.0.1
-
-- Cleaner log, grouped output files into a .ablunitrunner folder
-
-### 1.0.0
-
-- Initial release of ABLUnitRunner VSCode extension
-
+For the complete release history, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Updating the Extension
 
