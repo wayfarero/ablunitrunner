@@ -13,7 +13,7 @@
 ## Requirements
 
 - **[Progress OpenEdge](https://www.progress.com/openedge)** 11.7 or later installed
-- the `DLC` environment variable needs to be either set to the Progress OpenEdge installation path or the Riverside Software Openedge ABL openedge-project.json configuration file needs to specify the oeversion to a valid runtime DLC.
+- the `DLC` environment variable needs to be set to the Progress OpenEdge installation path, or the project `openedge-project.json` `oeversion` must match a runtime in VS Code setting `abl.configuration.runtimes`.
 
 **Example:**
 - **Windows:** `DLC=C:\Progress\OpenEdge`
@@ -30,12 +30,11 @@
 
 ## Release Notes
 
-### 1.0.16
+### 1.0.17
 
-- **Improvements:** 
-  - Ensured DLC resolution falls back to the OpenEdge ABL VSCode runtime configuration and then the environment variable when project settings are missing.
-  - Expanded command logging now shows the resolved DLC path in the runtime command for easier debugging.
-  - Improved Windows/Linux runner compatibility and configuration handling for DLC and PROPATH expansion.
+- **Bugfixes:** 
+  - corrected DLC resolving based on Openedge ABL runtime configuration.
+  
 
 For the complete release history, see [CHANGELOG.md](CHANGELOG.md).
 

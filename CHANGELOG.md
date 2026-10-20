@@ -1,3 +1,8 @@
+## 1.0.17
+
+- **Bugfixes:** 
+  - corrected DLC resolving based on Openedge ABL runtime configuration.
+
 ## 1.0.16
 
 - **Improvements:** 

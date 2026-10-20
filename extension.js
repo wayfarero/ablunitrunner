@@ -417,35 +417,79 @@ function loadOpenEdgeProjectConfig(filePath) {
  * @param {Object} projectCfg
  * @returns {string}
  */
-function resolveDlcFromOpenEdgeProject(projectCfg) {
+function getOpenEdgeAblRuntimeConfig(filePath) {
+    try {
+        const fileUri = filePath ? vscode.Uri.file(filePath) : undefined;
+        const ablScopedConfig = fileUri
+            ? vscode.workspace.getConfiguration('abl', fileUri)
+            : vscode.workspace.getConfiguration('abl');
+        const nestedRuntimes = ablScopedConfig.get('configuration.runtimes');
+        if (nestedRuntimes) {
+            return nestedRuntimes;
+        }
+
+        const rawScopedConfig = fileUri
+            ? vscode.workspace.getConfiguration(undefined, fileUri)
+            : vscode.workspace.getConfiguration();
+        return rawScopedConfig.get('abl.configuration.runtimes');
+    } catch (err) {
+        console.error('Failed to read OpenEdge ABL runtime configuration:', err);
+        return undefined;
+    }
+}
+
+function normalizeRuntimeEntries(runtimeConfig) {
+    if (!runtimeConfig) return [];
+
+    if (Array.isArray(runtimeConfig)) {
+        return runtimeConfig
+            .filter(runtime => runtime)
+            .map(runtime => ({ runtime, key: undefined }));
+    }
+
+    if (typeof runtimeConfig === 'object') {
+        return Object.entries(runtimeConfig).map(([key, runtime]) => ({ runtime, key }));
+    }
+
+    return [];
+}
+
+function getRuntimeVersion(runtime, keyHint) {
+    if (runtime && typeof runtime === 'object') {
+        return runtime.oeversion || runtime.oeVersion || runtime.version || keyHint;
+    }
+    return keyHint;
+}
+
+function getRuntimeDlc(runtime) {
+    if (!runtime) return undefined;
+    if (typeof runtime === 'string') return runtime;
+    if (typeof runtime !== 'object') return undefined;
+    return runtime.dlc || runtime.DLC || runtime.path || runtime.location || runtime.installPath;
+}
+
+function resolveDlcFromOpenEdgeProject(projectCfg, runtimeConfig) {
     if (!projectCfg || typeof projectCfg !== 'object') {
         return undefined;
     }
 
     const projectOeVersion = projectCfg.oeversion || projectCfg.oeVersion;
-    const runtimeConfig = projectCfg?.abl?.configuration?.runtimes;
-    const runtimeEntries = Array.isArray(runtimeConfig)
-        ? runtimeConfig
-        : runtimeConfig && typeof runtimeConfig === 'object'
-            ? Object.values(runtimeConfig)
-            : [];
-
-    const byVersion = runtimeEntries.filter((runtime) => {
-        if (!runtime || typeof runtime !== 'object') return false;
-        const runtimeVersion = runtime.oeversion || runtime.oeVersion || runtime.version;
+    const runtimeEntries = normalizeRuntimeEntries(runtimeConfig);
+    const byVersion = runtimeEntries.filter(({ runtime, key }) => {
+        const runtimeVersion = getRuntimeVersion(runtime, key);
         if (!runtimeVersion) return false;
         return !projectOeVersion || String(runtimeVersion) === String(projectOeVersion);
     });
 
-    const match = byVersion.find((runtime) => runtime.dlc || runtime.DLC || runtime.path || runtime.location || runtime.installPath)
-        || runtimeEntries.find((runtime) => runtime && typeof runtime === 'object' && (runtime.dlc || runtime.DLC || runtime.path || runtime.location || runtime.installPath))
+    const match = byVersion.find(({ runtime }) => !!getRuntimeDlc(runtime))
+        || runtimeEntries.find(({ runtime }) => !!getRuntimeDlc(runtime))
         || undefined;
 
     if (!match) {
         return projectCfg.dlc || projectCfg.DLC || undefined;
     }
 
-    return match.dlc || match.DLC || match.path || match.location || match.installPath || undefined;
+    return getRuntimeDlc(match.runtime) || projectCfg.dlc || projectCfg.DLC || undefined;
 }
 
 function normalizeDlcPlaceholders(value) {
@@ -454,6 +498,15 @@ function normalizeDlcPlaceholders(value) {
     }
 
     return value.replace(/@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}|%[Dd][Ll][Cc]%/g, '%DLC%');
+}
+
+function resolvePropathDlc(value, dlcPath) {
+    if (!value || !dlcPath) {
+        return value;
+    }
+
+    const normalizedDlc = dlcPath.replace(/\\/g, '/');
+    return value.replace(/@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}|%[Dd][Ll][Cc]%/g, normalizedDlc);
 }
 
 function buildPropathStr(projectCfg) {
@@ -841,11 +894,12 @@ function activate(context) {
         // runtime entry that matches the project's oeversion. Fall back to the
         // environment variable when the Riverside project config is absent or incomplete.
         const dlcEnv = process.env.DLC || process.env.dlc;
-        const projectDlc = resolveDlcFromOpenEdgeProject(projectCfg);
+        const runtimeConfig = getOpenEdgeAblRuntimeConfig(filePath);
+        const projectDlc = resolveDlcFromOpenEdgeProject(projectCfg, runtimeConfig);
         const hasRiversideProjectConfig = !!(projectCfg && (
             projectCfg.oeversion ||
             projectCfg.oeVersion ||
-            (projectCfg.abl && projectCfg.abl.configuration && projectCfg.abl.configuration.runtimes) ||
+            runtimeConfig ||
             (Array.isArray(projectCfg.buildPath) && projectCfg.buildPath.length > 0) ||
             (Array.isArray(projectCfg.dbConnections) && projectCfg.dbConnections.length > 0) ||
             projectCfg.extraParameters ||
@@ -853,7 +907,7 @@ function activate(context) {
         ));
         const effectiveDlc = projectDlc || dlcEnv || (projectCfg && projectCfg.dlc);
         if (!effectiveDlc) {
-            vscode.window.showErrorMessage('Environment variable DLC is not set. Set DLC to your OpenEdge installation path and restart VS Code.');
+            vscode.window.showErrorMessage('DLC could not be resolved. Set environment variable DLC or configure abl.configuration.runtimes to match openedge-project.json oeversion.');
             return;
         }
 
@@ -867,6 +921,7 @@ function activate(context) {
         const runnerCommand = isWindows ? `"${runner}"` : `sh "${runner}"`;
         const extraParams = fallbackProjectCfg.extraParameters || '';
         const propathStr = buildPropathStr(fallbackProjectCfg);
+        const resolvedPropathStr = resolvePropathDlc(propathStr, effectiveDlc);
         const dbConnectStr = getDbConnectsSpaceSeparated(fallbackProjectCfg);
 
 
@@ -947,7 +1002,7 @@ function activate(context) {
         const testFileArg = resolvedTestName ? `${relPath}#${resolvedTestName}` : relPath;
 
         const commandString = `${runnerCommand} --workdir "${workdir}" --testfile "${testFileArg}"` +
-            (propathStr ? ` --propath "${propathStr}"` : '') +
+            (resolvedPropathStr ? ` --propath "${resolvedPropathStr}"` : '') +
             (effectiveDlc ? ` --dlc "${effectiveDlc}"` : '');
 
         // Execute the prepared command in the workspace folder and run the internal refresh when it finishes.
@@ -1059,6 +1114,3 @@ module.exports = {
 	activate,
     deactivate
 }
-
-
-
