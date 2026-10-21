@@ -1,3 +1,8 @@
+## 1.0.18
+
+- **Bugfixes:** 
+  - corrected DLC resolving for Linux
+
 ## 1.0.17
 
 - **Bugfixes:** 

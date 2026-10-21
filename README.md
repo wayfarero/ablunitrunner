@@ -30,10 +30,10 @@
 
 ## Release Notes
 
-### 1.0.17
+### 1.0.18
 
 - **Bugfixes:** 
-  - corrected DLC resolving based on Openedge ABL runtime configuration.
+  - corrected DLC resolving for Linux
   
 
 For the complete release history, see [CHANGELOG.md](CHANGELOG.md).

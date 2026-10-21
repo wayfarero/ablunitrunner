@@ -1,8 +1,9 @@
 # Development folders
 .vscode
+.crosswayai
 .git
 .gitignore
-
+.gitattributes
 build
 tools
 resources/sample

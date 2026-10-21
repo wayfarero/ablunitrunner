@@ -505,8 +505,7 @@ function resolvePropathDlc(value, dlcPath) {
         return value;
     }
 
-    const normalizedDlc = dlcPath.replace(/\\/g, '/');
-    return value.replace(/@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}|%[Dd][Ll][Cc]%/g, normalizedDlc);
+    return expandDlcPlaceholders(value, dlcPath);
 }
 
 function buildPropathStr(projectCfg) {
@@ -549,10 +548,17 @@ function expandDlcPlaceholders(value, dlcPath) {
         return value;
     }
 
-    const normalizedDlc = dlcPath.replace(/\\/g, '/');
-    return value
-        .replace(/@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}|%[Dd][Ll][Cc]%/g, normalizedDlc)
-        .replace(/\//g, '\\');
+    const normalizedDlc = process.platform === 'win32'
+        ? dlcPath.replace(/\//g, '\\')
+        : dlcPath.replace(/\\/g, '/');
+    const expanded = value.replace(
+        /@\{[Dd][Ll][Cc]\}|\$\{[Dd][Ll][Cc]\}|%[Dd][Ll][Cc]%/g,
+        normalizedDlc
+    );
+
+    return process.platform === 'win32'
+        ? expanded.replace(/\//g, '\\')
+        : expanded.replace(/\\/g, '/');
 }
 
 function executeCommandString(commandString, filePath, onCloseCommand, resolvedDlc) {
