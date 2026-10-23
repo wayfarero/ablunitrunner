@@ -442,23 +442,17 @@ function normalizeRuntimeEntries(runtimeConfig) {
     if (!runtimeConfig) return [];
 
     if (Array.isArray(runtimeConfig)) {
-        return runtimeConfig
-            .filter(runtime => runtime)
-            .map(runtime => ({ runtime, key: undefined }));
-    }
-
-    if (typeof runtimeConfig === 'object') {
-        return Object.entries(runtimeConfig).map(([key, runtime]) => ({ runtime, key }));
+        return runtimeConfig.filter(runtime => runtime);
     }
 
     return [];
 }
 
-function getRuntimeVersion(runtime, keyHint) {
+function getRuntimeVersion(runtime) {
     if (runtime && typeof runtime === 'object') {
-        return runtime.oeversion || runtime.oeVersion || runtime.version || keyHint;
+        return runtime.name;
     }
-    return keyHint;
+    return undefined;
 }
 
 function getRuntimeDlc(runtime) {
@@ -475,21 +469,28 @@ function resolveDlcFromOpenEdgeProject(projectCfg, runtimeConfig) {
 
     const projectOeVersion = projectCfg.oeversion || projectCfg.oeVersion;
     const runtimeEntries = normalizeRuntimeEntries(runtimeConfig);
-    const byVersion = runtimeEntries.filter(({ runtime, key }) => {
-        const runtimeVersion = getRuntimeVersion(runtime, key);
-        if (!runtimeVersion) return false;
-        return !projectOeVersion || String(runtimeVersion) === String(projectOeVersion);
-    });
 
-    const match = byVersion.find(({ runtime }) => !!getRuntimeDlc(runtime))
-        || runtimeEntries.find(({ runtime }) => !!getRuntimeDlc(runtime))
-        || undefined;
-
-    if (!match) {
-        return projectCfg.dlc || projectCfg.DLC || undefined;
+    if (projectOeVersion) {
+        const matchedRuntime = runtimeEntries.find(runtime => {
+            const runtimeVersion = getRuntimeVersion(runtime);
+            return runtimeVersion && String(runtimeVersion) === String(projectOeVersion) && !!getRuntimeDlc(runtime);
+        });
+        if (matchedRuntime) {
+            return getRuntimeDlc(matchedRuntime);
+        }
     }
 
-    return getRuntimeDlc(match.runtime) || projectCfg.dlc || projectCfg.DLC || undefined;
+    const projectDlc = projectCfg.dlc || projectCfg.DLC;
+    if (projectDlc) {
+        return projectDlc;
+    }
+
+    const firstRuntimeDlc = runtimeEntries.find(runtime => !!getRuntimeDlc(runtime));
+    if (firstRuntimeDlc) {
+        return getRuntimeDlc(firstRuntimeDlc);
+    }
+
+    return undefined;
 }
 
 function normalizeDlcPlaceholders(value) {
@@ -911,7 +912,7 @@ function activate(context) {
             projectCfg.extraParameters ||
             projectCfg.propath
         ));
-        const effectiveDlc = projectDlc || dlcEnv || (projectCfg && projectCfg.dlc);
+        const effectiveDlc = projectDlc || dlcEnv;
         if (!effectiveDlc) {
             vscode.window.showErrorMessage('DLC could not be resolved. Set environment variable DLC or configure abl.configuration.runtimes to match openedge-project.json oeversion.');
             return;

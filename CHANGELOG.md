@@ -1,3 +1,9 @@
+## 1.0.19
+
+- **Bugfixes:** 
+  - corrected DLC resolution precedence for OpenEdge ABL runtime configurations.
+  - `oeversion` values now match runtime `name` values first, then project DLC, then the first available runtime, and finally the environment variable.
+
 ## 1.0.18
 
 - **Bugfixes:** 

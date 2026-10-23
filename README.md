@@ -13,7 +13,11 @@
 ## Requirements
 
 - **[Progress OpenEdge](https://www.progress.com/openedge)** 11.7 or later installed
-- the `DLC` environment variable needs to be set to the Progress OpenEdge installation path, or the project `openedge-project.json` `oeversion` must match a runtime in VS Code setting `abl.configuration.runtimes`.
+- DLC is resolved in this order of precedence:
+  1. a runtime in `abl.configuration.runtimes` whose `name` matches the project's `openedge-project.json` `oeversion`
+  2. the project `dlc` / `DLC` value from `openedge-project.json`
+  3. the first available runtime entry in `abl.configuration.runtimes`
+  4. the `DLC` environment variable
 
 **Example:**
 - **Windows:** `DLC=C:\Progress\OpenEdge`
@@ -30,11 +34,11 @@
 
 ## Release Notes
 
-### 1.0.18
+### 1.0.19
 
 - **Bugfixes:** 
-  - corrected DLC resolving for Linux
-  
+  - corrected DLC resolution precedence for OpenEdge ABL runtime configurations.
+  - `oeversion` values now match runtime `name` values first, then project DLC, then the first available runtime, and finally the environment variable.
 
 For the complete release history, see [CHANGELOG.md](CHANGELOG.md).
 
