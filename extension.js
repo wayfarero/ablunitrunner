@@ -15,22 +15,168 @@ function getAblUnitOutputChannel() {
     return ablUnitOutputChannel;
 }
 
+const STOP_ABLUNIT_COMMAND_ID = 'ABLUnitRunner._stopActiveRun';
+const HAS_FAILED_TESTS_CONTEXT_KEY = 'ablunitRunner.hasFailedTests';
+const LINUX_KILL_GRACE_MS = 3000;
+
+/**
+ * @typedef {Object} FailedTestEntry
+ * @property {string} key
+ * @property {string} filePath
+ * @property {string} testName
+ * @property {vscode.TestItem} testItem
+ */
+
+/** @type {Map<string, FailedTestEntry>} */
+const failedTestsByKey = new Map();
+
+/**
+ * Build a normalized lookup key for matching a test case across runs.
+ * @param {string} filePath
+ * @param {string} testName
+ * @returns {string}
+ */
+function makeTestLookupKey(filePath, testName) {
+    const normalizedPath = path.normalize(filePath || '');
+    const pathKey = process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath;
+    return `${pathKey}::${(testName || '').trim().toLowerCase()}`;
+}
+
+/**
+ * Update VS Code context key controlling visibility of 'Rerun Failed Tests'.
+ * @param {boolean} hasFailures
+ */
+function setHasFailedTestsContext(hasFailures) {
+    vscode.commands.executeCommand('setContext', HAS_FAILED_TESTS_CONTEXT_KEY, Boolean(hasFailures));
+}
+
+/**
+ * @typedef {Object} ActiveAblUnitSession
+ * @property {import('child_process').ChildProcess | null} proc
+ * @property {number | null} pid
+ * @property {boolean} isCancelled
+ * @property {() => void} cancel
+ * @property {() => void} disposeOnDeactivate
+ */
+
+/** @type {ActiveAblUnitSession | null} */
+let activeAblUnitSession = null;
+
+/**
+ * Display a warning when the user attempts to start an overlapping ABLUnit run.
+ */
+function showOverlappingRunWarning() {
+    const pidPart = activeAblUnitSession?.pid !== null && activeAblUnitSession?.pid !== undefined
+        ? ` [PID ${activeAblUnitSession.pid}]`
+        : '';
+    vscode.window.showWarningMessage(
+        `An ABLUnit test session${pidPart} is already running. Stop the active run or wait for it to finish before starting another.`
+    );
+}
+
+/**
+ * Check whether a POSIX process group still has live processes.
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isProcessGroupAlive(pid) {
+    try {
+        process.kill(-pid, 0);
+        return true;
+    } catch (err) {
+        return Boolean(err && err.code === 'EPERM');
+    }
+}
+
+/**
+ * Terminate a spawned runner process tree across Windows and Linux/POSIX.
+ * Returns a cleanup callback to clear any pending escalation timer.
+ *
+ * @param {import('child_process').ChildProcess | null} proc
+ * @param {vscode.OutputChannel} [outputChannel]
+ * @param {boolean} [immediate=false]
+ * @returns {() => void}
+ */
+function terminateProcessTree(proc, outputChannel, immediate = false) {
+    if (!proc || proc.pid === undefined || proc.pid === null) {
+        return () => {};
+    }
+
+    const pid = proc.pid;
+
+    if (process.platform === 'win32') {
+        const killer = spawn('taskkill', ['/T', '/F', '/PID', String(pid)], {
+            windowsHide: true,
+            stdio: 'ignore'
+        });
+        killer.unref();
+        killer.on('error', (err) => {
+            console.error(`Failed to execute taskkill for PID ${pid}:`, err);
+            try {
+                proc.kill();
+            } catch {
+                // Process already exited
+            }
+        });
+        return () => {};
+    }
+
+    const sendGroupSignal = (signal) => {
+        try {
+            process.kill(-pid, signal);
+        } catch (err) {
+            if (err && err.code !== 'ESRCH') {
+                try {
+                    proc.kill(signal);
+                } catch {
+                    // Process already exited
+                }
+            }
+        }
+    };
+
+    if (immediate) {
+        sendGroupSignal('SIGKILL');
+        return () => {};
+    }
+
+    sendGroupSignal('SIGTERM');
+    const escalationTimer = setTimeout(() => {
+        if (isProcessGroupAlive(pid)) {
+            if (outputChannel) {
+                outputChannel.appendLine(`Process group ${pid} still running after ${LINUX_KILL_GRACE_MS / 1000}s; escalating to SIGKILL.`);
+            }
+            sendGroupSignal('SIGKILL');
+        }
+    }, LINUX_KILL_GRACE_MS);
+
+    return () => {
+        clearTimeout(escalationTimer);
+    };
+}
+
 /**
  * Show a status bar spinner while an ABLUnit process is running.
- * Returns a cleanup function that stops updates and disposes the item.
+ * Returns helpers to update PID, stop with a transient completion message, or dispose immediately.
  *
- * @returns {(finalText?: string) => void}
+ * @param {string} [commandId]
+ * @returns {{ stop: (finalText?: string) => void, setPid: (newPid: number | undefined) => void, disposeNow: () => void }}
  */
-function startAblUnitRunStatus() {
+function startAblUnitRunStatus(commandId) {
     const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     const startedAt = Date.now();
     let pid = null;
+    let disposeTimer = null;
+
+    if (commandId) {
+        item.command = commandId;
+    }
 
     const update = () => {
         const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
         const pidPart = pid !== null ? ` [PID ${pid}]` : '';
         item.text = `$(sync~spin) ABLUnit Running ${elapsedSec}s${pidPart}`;
-        item.tooltip = `ABLUnit run in progress (${elapsedSec}s)${pidPart}`;
+        item.tooltip = `ABLUnit run in progress (${elapsedSec}s)${pidPart} — Click to stop`;
     };
 
     update();
@@ -43,25 +189,40 @@ function startAblUnitRunStatus() {
         if (stopped) return;
         stopped = true;
         clearInterval(timer);
+        item.command = undefined;
 
         if (finalText) {
             const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
             const textWithTime = `${finalText} (${elapsedSec}s)`;
             item.text = textWithTime;
             item.tooltip = textWithTime;
-            setTimeout(() => item.dispose(), 2500);
+            disposeTimer = setTimeout(() => {
+                disposeTimer = null;
+                item.dispose();
+            }, 2500);
             return;
         }
 
         item.dispose();
     };
 
+    const disposeNow = () => {
+        stopped = true;
+        clearInterval(timer);
+        if (disposeTimer !== null) {
+            clearTimeout(disposeTimer);
+            disposeTimer = null;
+        }
+        item.command = undefined;
+        item.dispose();
+    };
+
     const setPid = (newPid) => {
-        pid = newPid;
+        pid = newPid ?? null;
         update();
     };
 
-    return { stop, setPid };
+    return { stop, setPid, disposeNow };
 }
 
 // This method is called when your extension is activated
@@ -562,53 +723,271 @@ function expandDlcPlaceholders(value, dlcPath) {
         : expanded.replace(/\\/g, '/');
 }
 
-function executeCommandString(commandString, filePath, onCloseCommand, resolvedDlc) {
-    try {
-        const workspaceFolderPath = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath || process.cwd();
-        const outputChannel = getAblUnitOutputChannel();
-        const runStatus = startAblUnitRunStatus();
-        outputChannel.show(true);
-        const displayCommandString = resolvedDlc ? expandDlcPlaceholders(commandString, resolvedDlc) : commandString;
-        outputChannel.appendLine(`Executing: ${displayCommandString}`);
+/**
+ * Execute a shell command string in the workspace folder for the given file (or cwd fallback).
+ * Streams stdout/stderr into an OutputChannel, supports cancellation, and resolves on completion.
+ *
+ * @param {string} commandString
+ * @param {string} filePath
+ * @param {function|string|undefined} [onCloseCommand]
+ * @param {string|undefined} [resolvedDlc]
+ * @param {{ testRun?: vscode.TestRun, cancellationToken?: vscode.CancellationToken }} [runOptions]
+ * @returns {Promise<{ code: number | null, cancelled: boolean }>}
+ */
+function executeCommandString(commandString, filePath, onCloseCommand, resolvedDlc, runOptions) {
+    return new Promise((resolve) => {
+        const testRun = runOptions?.testRun;
+        const externalToken = runOptions?.cancellationToken;
+        let runStatus = null;
+        let clearKillTimer = () => {};
+        let runTokenListener = null;
+        let externalTokenListener = null;
+        let settled = false;
 
-        const proc = spawn(commandString, { shell: true, cwd: workspaceFolderPath, env: process.env });
-        outputChannel.appendLine(`Started process with PID ${proc.pid}`);
-        runStatus.setPid(proc.pid);
+        const endTestRunSafely = () => {
+            if (!testRun) return;
+            try {
+                testRun.end();
+            } catch (endErr) {
+                console.error('Failed to end TestRun:', endErr);
+            }
+        };
 
-        proc.stdout.on('data', (data) => outputChannel.append(data.toString()));
-        proc.stderr.on('data', (data) => outputChannel.append(data.toString()));
+        const cleanupSessionResources = () => {
+            clearKillTimer();
+            clearKillTimer = () => {};
+            if (runTokenListener) {
+                runTokenListener.dispose();
+                runTokenListener = null;
+            }
+            if (externalTokenListener) {
+                externalTokenListener.dispose();
+                externalTokenListener = null;
+            }
+            activeAblUnitSession = null;
+        };
 
-        proc.on('error', (err) => {
-            runStatus.stop('$(error) ABLUnit failed');
-            outputChannel.appendLine(`Failed to start process: ${err.message}`);
-            vscode.window.showErrorMessage(`Failed to run ABLUnit: ${err.message}`);
-        });
+        try {
+            const workspaceFolderPath = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath || process.cwd();
+            const outputChannel = getAblUnitOutputChannel();
+            runStatus = startAblUnitRunStatus(STOP_ABLUNIT_COMMAND_ID);
+            outputChannel.show(true);
+            const displayCommandString = resolvedDlc ? expandDlcPlaceholders(commandString, resolvedDlc) : commandString;
+            outputChannel.appendLine(`Executing: ${displayCommandString}`);
 
-        proc.on('close', (code) => {
-            runStatus.stop(code === 0 ? '$(check) ABLUnit done' : `$(error) ABLUnit failed (${code})`);
-            outputChannel.appendLine(`Process exited with code ${code}`);
-            const msg = code === 0 ? 'Run completed successfully' : `Run completed with exit code ${code}`;
-            vscode.window.showInformationMessage(msg);
-            // Optionally execute a function callback or a registered VS Code command after the process exits
-            if (onCloseCommand) {
+            const proc = spawn(commandString, {
+                shell: true,
+                cwd: workspaceFolderPath,
+                env: process.env,
+                detached: process.platform !== 'win32'
+            });
+            outputChannel.appendLine(`Started process with PID ${proc.pid}`);
+            runStatus.setPid(proc.pid);
+
+            const session = {
+                proc,
+                pid: proc.pid ?? null,
+                isCancelled: false,
+                cancel: () => {
+                    if (session.isCancelled || settled) return;
+                    session.isCancelled = true;
+                    outputChannel.appendLine(`Cancelling ABLUnit process${proc.pid ? ` (PID ${proc.pid})` : ''}...`);
+                    clearKillTimer = terminateProcessTree(proc, outputChannel, false);
+                },
+                disposeOnDeactivate: () => {
+                    if (settled) return;
+                    settled = true;
+                    session.isCancelled = true;
+                    cleanupSessionResources();
+                    terminateProcessTree(proc, undefined, true);
+                    if (runStatus) {
+                        runStatus.disposeNow();
+                    }
+                    endTestRunSafely();
+                    resolve({ code: null, cancelled: true });
+                }
+            };
+            activeAblUnitSession = session;
+
+            if (testRun?.token) {
+                if (testRun.token.isCancellationRequested) {
+                    session.cancel();
+                } else {
+                    runTokenListener = testRun.token.onCancellationRequested(() => session.cancel());
+                }
+            }
+
+            if (externalToken) {
+                if (externalToken.isCancellationRequested) {
+                    session.cancel();
+                } else {
+                    externalTokenListener = externalToken.onCancellationRequested(() => session.cancel());
+                }
+            }
+
+            proc.stdout.on('data', (data) => outputChannel.append(data.toString()));
+            proc.stderr.on('data', (data) => outputChannel.append(data.toString()));
+
+            proc.on('error', (err) => {
+                if (settled) return;
+                settled = true;
+                const wasCancelled = session.isCancelled;
+                cleanupSessionResources();
+
+                if (wasCancelled) {
+                    runStatus.stop('$(circle-slash) ABLUnit cancelled');
+                    outputChannel.appendLine('ABLUnit run cancelled by user.');
+                    endTestRunSafely();
+                    vscode.window.showInformationMessage('ABLUnit run cancelled');
+                    resolve({ code: null, cancelled: true });
+                    return;
+                }
+
+                runStatus.stop('$(error) ABLUnit failed');
+                outputChannel.appendLine(`Failed to start process: ${err.message}`);
+                endTestRunSafely();
+                vscode.window.showErrorMessage(`Failed to run ABLUnit: ${err.message}`);
+                resolve({ code: null, cancelled: false });
+            });
+
+            proc.on('close', (code) => {
+                if (settled) return;
+                settled = true;
+                const wasCancelled = session.isCancelled;
+                cleanupSessionResources();
+
+                if (wasCancelled) {
+                    runStatus.stop('$(circle-slash) ABLUnit cancelled');
+                    outputChannel.appendLine('ABLUnit run cancelled by user.');
+                    endTestRunSafely();
+                    vscode.window.showInformationMessage('ABLUnit run cancelled');
+                    resolve({ code, cancelled: true });
+                    return;
+                }
+
+                runStatus.stop(code === 0 ? '$(check) ABLUnit done' : `$(error) ABLUnit failed (${code})`);
+                outputChannel.appendLine(`Process exited with code ${code}`);
+                const msg = code === 0 ? 'Run completed successfully' : `Run completed with exit code ${code}`;
+                vscode.window.showInformationMessage(msg);
+
+                // Optionally execute a function callback or a registered VS Code command after the process exits
                 try {
-                    if (typeof onCloseCommand === 'function') {
-                        // Call the function and pass the exit code
-                        onCloseCommand(code);
-                    } else {
-                        vscode.commands.executeCommand(onCloseCommand);
+                    if (onCloseCommand) {
+                        if (typeof onCloseCommand === 'function') {
+                            onCloseCommand(code);
+                        } else {
+                            vscode.commands.executeCommand(onCloseCommand);
+                        }
                     }
                 } catch (err) {
                     console.error('Failed to execute onCloseCommand:', err);
+                } finally {
+                    endTestRunSafely();
+                }
+
+                resolve({ code, cancelled: false });
+            });
+
+            vscode.window.showInformationMessage(`Executing command (see 'ABLUnit Runner' output)`);
+        } catch (err) {
+            settled = true;
+            cleanupSessionResources();
+            if (runStatus) {
+                runStatus.disposeNow();
+            }
+            endTestRunSafely();
+            console.error('Failed to execute command:', err);
+            vscode.window.showErrorMessage('Failed to execute prepared command. See developer console for details.');
+            resolve({ code: null, cancelled: false });
+        }
+    });
+}
+
+/**
+ * Format a test file path (and optional test case/method name) into the target string
+ * expected by ABLUnitCore.p (stripping matching source buildPath prefixes for .cls files).
+ *
+ * @param {string} filePath
+ * @param {string|undefined} selectedTestName
+ * @param {string} workdir
+ * @param {Object} projectCfg
+ * @returns {string}
+ */
+function formatAblTestTarget(filePath, selectedTestName, workdir, projectCfg) {
+    const fileUri = vscode.Uri.file(filePath);
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+    let relPath = workspaceFolder
+        ? path.relative(workspaceFolder.uri.fsPath, filePath).replace(/\\/g, '/')
+        : path.relative(workdir, filePath).replace(/\\/g, '/') || path.basename(filePath);
+
+    if (filePath.toLowerCase().endsWith('.cls')) {
+        const sourcePaths = projectCfg?.buildPath
+            ?.filter(p => p.type === 'source' && p.path)
+            .map(p => {
+                let pth = p.path.replace(/\\/g, '/');
+                if (pth.startsWith('./') && pth.length > 1) {
+                    pth = pth.substring(2);
+                } else if (pth === '.') {
+                    pth = '';
+                }
+                return pth;
+            }) || [];
+        sourcePaths.sort((a, b) => b.length - a.length);
+
+        for (const sourcePath of sourcePaths) {
+            if (sourcePath && relPath.startsWith(sourcePath + '/')) {
+                relPath = relPath.substring(sourcePath.length + 1);
+                break;
+            }
+        }
+    }
+
+    const resolvedTestName = typeof selectedTestName === 'string'
+        ? (selectedTestName.trim().split(/\s+/)[0] || '')
+        : '';
+    return resolvedTestName ? `${relPath}#${resolvedTestName}` : relPath;
+}
+
+/**
+ * Index existing test case and suite items currently in the TestController tree.
+ *
+ * @param {vscode.TestController} controller
+ * @returns {{ testsByKey: Map<string, vscode.TestItem>, suitesByPath: Map<string, vscode.TestItem> }}
+ */
+function indexExistingControllerItems(controller) {
+    const testsByKey = new Map();
+    const suitesByPath = new Map();
+
+    const normalizePathKey = (fsPath) => {
+        const norm = path.normalize(fsPath || '');
+        return process.platform === 'win32' ? norm.toLowerCase() : norm;
+    };
+
+    const visitCollection = (collection) => {
+        if (!collection || typeof collection.forEach !== 'function') {
+            return;
+        }
+        collection.forEach((item) => {
+            if (item.uri?.fsPath) {
+                if (item.contextValue === 'ablunitTest' || item.id.includes(':')) {
+                    const colonIdx = item.id.lastIndexOf(':');
+                    const rawName = colonIdx >= 0
+                        ? item.id.substring(colonIdx + 1)
+                        : (item.label || '').trim().split(/\s+/)[0];
+                    const key = makeTestLookupKey(item.uri.fsPath, rawName);
+                    testsByKey.set(key, item);
+                } else {
+                    suitesByPath.set(normalizePathKey(item.uri.fsPath), item);
                 }
             }
+            if (item.children) {
+                visitCollection(item.children);
+            }
         });
+    };
 
-        vscode.window.showInformationMessage(`Executing command (see 'ABLUnit Runner' output)`);
-    } catch (err) {
-        console.error('Failed to execute command:', err);
-        vscode.window.showErrorMessage('Failed to execute prepared command. See developer console for details.');
-    }
+    visitCollection(controller.items);
+    return { testsByKey, suitesByPath };
 }
 
 /**
@@ -617,8 +996,10 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
  * @param {vscode.TestRun} run
  * @param {string} [baseWorkspacePath] - Override the base workspace path for resolving test file paths
  * @param {Object} [projectCfg] - Project configuration for source path resolution
+ * @param {{ merge?: boolean }} [options] - When merge is true, updates existing TestItems in-place
  */
-function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, projectCfg) {
+function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, projectCfg, options) {
+    const isMerge = Boolean(options?.merge);
 
     const outputChannel = getAblUnitOutputChannel();
     outputChannel.appendLine(`Start loading AblUnit results..`);    
@@ -626,8 +1007,15 @@ function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, project
     vscode.commands.executeCommand('workbench.view.testing');
     vscode.commands.executeCommand('testing.showMostRecentOutput');
     
-    // Clear previous test items
-    controller.items.replace([]);
+    const existingIndex = isMerge
+        ? indexExistingControllerItems(controller)
+        : { testsByKey: new Map(), suitesByPath: new Map() };
+
+    if (!isMerge) {
+        // Clear previous test items and failed-test tracking on full/non-merged runs
+        controller.items.replace([]);
+        failedTestsByKey.clear();
+    }
 
     const xml = parseResultsXml(xmlPath);
 
@@ -656,6 +1044,11 @@ function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, project
     // Sort by longest path first to match the most specific path
     sourcePaths.sort((a, b) => b.length - a.length);
 
+    const normalizeSuitePathKey = (fsPath) => {
+        const norm = path.normalize(fsPath || '');
+        return process.platform === 'win32' ? norm.toLowerCase() : norm;
+    };
+
     function addSuiteRecursive(suiteNode, parentItem) {
         const suiteName = suiteNode.getAttribute("classname") || suiteNode.getAttribute("name") || "UnnamedSuite";
         const suiteFile = suiteNode.getAttribute("name") || "";
@@ -681,12 +1074,18 @@ function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, project
         }
         
         const suiteUri = vscode.Uri.file(suitePath);
-        const suiteItem = controller.createTestItem(suiteId, suiteName, suiteUri);
-        suiteItem.contextValue = "ablunitSuite";
-        if (parentItem) {
-            parentItem.children.add(suiteItem);
-        } else {
-            controller.items.add(suiteItem);
+        let suiteItem = isMerge ? existingIndex.suitesByPath.get(normalizeSuitePathKey(suitePath)) : undefined;
+        if (!suiteItem) {
+            suiteItem = controller.createTestItem(suiteId, suiteName, suiteUri);
+            suiteItem.contextValue = "ablunitSuite";
+            if (parentItem) {
+                parentItem.children.add(suiteItem);
+            } else {
+                controller.items.add(suiteItem);
+            }
+            if (isMerge) {
+                existingIndex.suitesByPath.set(normalizeSuitePathKey(suitePath), suiteItem);
+            }
         }
 
         // Add nested suites recursively
@@ -725,16 +1124,29 @@ function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, project
             
             const uri = vscode.Uri.file(testPath);
             const range = findAblTestRange(uri.fsPath, testName);
-            const testId = `${suiteId}:${testName}`;
-            const testItem = controller.createTestItem(testId, testName + ' (' + testTime + ')', uri);
-            testItem.contextValue = "ablunitTest";
+            const lookupKey = makeTestLookupKey(uri.fsPath, testName);
+            let testItem = isMerge ? existingIndex.testsByKey.get(lookupKey) : undefined;
+            if (testItem) {
+                testItem.label = testName + ' (' + testTime + ')';
                 testItem.range = range;
-            suiteItem.children.add(testItem);
+            } else {
+                const testId = `${suiteItem.id}:${testName}`;
+                testItem = controller.createTestItem(testId, testName + ' (' + testTime + ')', uri);
+                testItem.contextValue = "ablunitTest";
+                testItem.range = range;
+                suiteItem.children.add(testItem);
+                if (isMerge) {
+                    existingIndex.testsByKey.set(lookupKey, testItem);
+                }
+            }
+
             if (testStatus === "Success") {
                 testItem.busy = false;
                 testItem.error = undefined;
+                failedTestsByKey.delete(lookupKey);
                 run.passed(testItem);
             } else if (testStatus === "Error" || testStatus === "Failure") {
+                testItem.busy = false;
                 const errorNode = testNode.getElementsByTagName(testStatus.toLowerCase())[0];
                 let errorMessage = "";
                 let errorType = "Unknown error";
@@ -780,6 +1192,12 @@ function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, project
                 if (errorRange) {
                     testMsg.location = new vscode.Location(uri, errorRange);
                 }
+                failedTestsByKey.set(lookupKey, {
+                    key: lookupKey,
+                    filePath: uri.fsPath,
+                    testName,
+                    testItem
+                });
                 run.failed(testItem, [testMsg]);
             }
         }
@@ -799,6 +1217,7 @@ function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, project
             addSuiteRecursive(testSuites[i], null);
         }
     }
+    setHasFailedTestsContext(failedTestsByKey.size > 0);
     outputChannel.appendLine(`Done loading AblUnit results.`);    
 
 }
@@ -827,27 +1246,56 @@ function activate(context) {
 
 	const controller = vscode.tests.createTestController('ablunitController', 'ABLUnit Tests');
     context.subscriptions.push(controller);
+    setHasFailedTestsContext(false);
 
     // Register handler for running tests (via CodeLens, Test Results view, etc.)
     const runProfile = controller.createRunProfile(
         'Run ABLUnit Tests',
         vscode.TestRunProfileKind.Run,
-        async (request) => {
+        async (request, token) => {
+            if (activeAblUnitSession) {
+                showOverlappingRunWarning();
+                return;
+            }
             const tests = request.include || [];
             for (const test of tests) {
+                if (token?.isCancellationRequested) {
+                    break;
+                }
                 // Extract test name from test ID (format: "suiteId:testName")
                 const testName = test.id.includes(':') ? test.id.split(':')[1] : undefined;
                 // Run the test using the existing command
-                await vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', test.uri, testName);
+                const result = await vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', test.uri, testName, token);
+                if (token?.isCancellationRequested || result?.cancelled) {
+                    break;
+                }
             }
         },
         true // isDefault
     );
     context.subscriptions.push(runProfile);
 
+    // Internal-only command bound to the status bar spinner to confirm and cancel an active run
+    const stopAblUnitRun = vscode.commands.registerCommand(STOP_ABLUNIT_COMMAND_ID, async function () {
+        if (!activeAblUnitSession || activeAblUnitSession.isCancelled) {
+            return;
+        }
+        const sessionSnapshot = activeAblUnitSession;
+        const pidLabel = sessionSnapshot.pid !== null ? ` [PID ${sessionSnapshot.pid}]` : '';
+        const choice = await vscode.window.showWarningMessage(
+            `Stop the running ABLUnit test session${pidLabel}?`,
+            { modal: true },
+            'Stop'
+        );
+        if (choice === 'Stop' && activeAblUnitSession === sessionSnapshot && !sessionSnapshot.isCancelled) {
+            sessionSnapshot.cancel();
+        }
+    });
+    context.subscriptions.push(stopAblUnitRun);
+
 
 	// Internal helper: read the project's `results.xml` (optionally from a supplied project folder) and load it into the test controller
-	function readResultsXml(outputFolder, baseWorkspacePath, projectCfg) {
+	function readResultsXml(outputFolder, baseWorkspacePath, projectCfg, existingRun, options) {
 		//vscode.window.showInformationMessage('Refreshing ABLUnit results...');
 
 		let resultsFile;
@@ -867,25 +1315,39 @@ function activate(context) {
 			return;
 		}
 		
-		const run = controller.createTestRun(new vscode.TestRunRequest());
+		const ownsRun = !existingRun;
+		const run = existingRun || controller.createTestRun(new vscode.TestRunRequest());
 
-		loadAblUnitResults(controller, resultsFile, run, baseWorkspacePath, projectCfg);
-
-		run.end();
+		try {
+			loadAblUnitResults(controller, resultsFile, run, baseWorkspacePath, projectCfg, options);
+		} catch (err) {
+			console.error('Failed to parse or load results.xml:', err);
+			vscode.window.showErrorMessage('Failed to load ABLUnit results.xml: ' + (err.message || err.toString()));
+		} finally {
+			if (ownsRun) {
+				run.end();
+			}
+		}
 
 //		vscode.window.showInformationMessage('ABLUnit results refreshed.');
 
 }
 
 
-    const runABLUnitOnFile = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnFile', function (resource, selectedTestName) {
+    const runABLUnitOnFile = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnFile', function (resource, selectedTestName, cancellationToken) {
+        // Guard against overlapping runs before touching output channel, TestController, or .ablunitrunner files
+        if (activeAblUnitSession) {
+            showOverlappingRunWarning();
+            return Promise.resolve({ code: null, cancelled: false });
+        }
+
         // When invoked from the explorer/context menu VS Code passes the resource (Uri) as the
         // first argument. Fall back to the active editor if it's not provided.
         const filePath = resource?.fsPath || vscode.window.activeTextEditor?.document.uri.fsPath;
 
         if (!filePath) {
             vscode.window.showInformationMessage('ABLUnit: No file selected');
-            return;
+            return Promise.resolve({ code: null, cancelled: false });
         }
 
         // Start each run with a clean output channel
@@ -915,7 +1377,7 @@ function activate(context) {
         const effectiveDlc = projectDlc || dlcEnv;
         if (!effectiveDlc) {
             vscode.window.showErrorMessage('DLC could not be resolved. Set environment variable DLC or configure abl.configuration.runtimes to match openedge-project.json oeversion.');
-            return;
+            return Promise.resolve({ code: null, cancelled: false });
         }
 
         const fallbackProjectCfg = !hasRiversideProjectConfig && effectiveDlc
@@ -936,30 +1398,7 @@ function activate(context) {
         const fileUri = vscode.Uri.file(filePath);
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
         const workdir = workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(filePath);
-        let relPath = workspaceFolder ? path.relative(workspaceFolder.uri.fsPath, filePath).replace(/\\/g, '/') : path.basename(filePath);
-
-        if (filePath.toLowerCase().endsWith('.cls')) {
-            const sourcePaths = projectCfg.buildPath
-                ?.filter(p => p.type === 'source' && p.path)
-                .map(p => {
-                    let pth = p.path.replace(/\\/g, '/');
-                    // Remove leading './' if it exists and path is not just '.'
-                    if (pth.startsWith('./') && pth.length > 1) {
-                        pth = pth.substring(2);
-                    } else if (pth === '.') { // If path is just '.', treat as empty string for root matching
-                        pth = '';
-                    }
-                    return pth;
-                }) || [];
-            sourcePaths.sort((a, b) => b.length - a.length); // Sort by longest path first
-
-            for (const sourcePath of sourcePaths) {
-                if (relPath.startsWith(sourcePath + '/')) {
-                    relPath = relPath.substring(sourcePath.length + 1);
-                    break;
-                }
-            }
-        }
+        const testFileArg = formatAblTestTarget(filePath, selectedTestName, workdir, projectCfg);
 
         const outputFolder = path.join(workdir, '.ablunitrunner');
 
@@ -967,11 +1406,8 @@ function activate(context) {
         try {
             controller.items.replace([]);
             controller.invalidateTestResults();
-            // Publish a blank, most-recent test run so the output panel resets
-            const blankRun = controller.createTestRun(new vscode.TestRunRequest(), 'No current test results', true);
-            blankRun.end();
-            vscode.commands.executeCommand('workbench.view.testing');
-            vscode.commands.executeCommand('testing.showMostRecentOutput');
+            failedTestsByKey.clear();
+            setHasFailedTestsContext(false);
         } catch (clearErr) {
             console.error('Failed to clear testing view/results:', clearErr);
         }
@@ -1000,13 +1436,18 @@ function activate(context) {
         } catch (err) {
             console.error('Failed to write to .ablunitrunner folder:', err);
             vscode.window.showErrorMessage('Failed to write to .ablunitrunner folder: ' + err.message);
-            return;
+            return Promise.resolve({ code: null, cancelled: false });
         }
 
-        const resolvedTestName = typeof selectedTestName === 'string'
-            ? (selectedTestName.trim().split(/\s+/)[0] || '')
-            : '';
-        const testFileArg = resolvedTestName ? `${relPath}#${resolvedTestName}` : relPath;
+        // Open an active TestRun for the duration of execution so VS Code's native Testing 'Stop' button is enabled
+        let activeTestRun;
+        try {
+            activeTestRun = controller.createTestRun(new vscode.TestRunRequest(), 'ABLUnit Test Run', true);
+            vscode.commands.executeCommand('workbench.view.testing');
+            vscode.commands.executeCommand('testing.showMostRecentOutput');
+        } catch (runErr) {
+            console.error('Failed to create active TestRun:', runErr);
+        }
 
         const commandString = `${runnerCommand} --workdir "${workdir}" --testfile "${testFileArg}"` +
             (resolvedPropathStr ? ` --propath "${resolvedPropathStr}"` : '') +
@@ -1015,7 +1456,13 @@ function activate(context) {
         // Execute the prepared command in the workspace folder and run the internal refresh when it finishes.
         // Log the fully expanded DLC path for readability while still passing the original command string
         // to the shell so Windows can resolve %DLC% expansions during execution.
-        executeCommandString(commandString, workdir, readResultsXml.bind(null, outputFolder, workdir, fallbackProjectCfg), effectiveDlc);
+        return executeCommandString(
+            commandString,
+            workdir,
+            () => readResultsXml(outputFolder, workdir, fallbackProjectCfg, activeTestRun),
+            effectiveDlc,
+            { testRun: activeTestRun, cancellationToken }
+        );
     });
 
     const runABLUnitOnTestItem = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnTestItem', function (testItemOrItems) {
@@ -1068,11 +1515,10 @@ function activate(context) {
         const isSingleTest = typeof selectedTestId === 'string' && selectedTestId.includes(':');
 
         if (isSingleTest) {
-            vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri, selectedTestName);
-            return;
+            return vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri, selectedTestName);
         }
 
-        vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri);
+        return vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri);
     });
 
     const runABLUnitOnTestSuite = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnTestSuite', function (testItemOrItems) {
@@ -1105,17 +1551,150 @@ function activate(context) {
         }
 
         // Suite rerun: always execute against the suite file without #<testName> suffix.
-        vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri);
+        return vscode.commands.executeCommand('ABLUnitRunner.RunABLUnitOnFile', testUri);
+    });
+
+    const rerunFailedTests = vscode.commands.registerCommand('ABLUnitRunner.RerunFailedTests', function () {
+        if (activeAblUnitSession) {
+            showOverlappingRunWarning();
+            return Promise.resolve({ code: null, cancelled: false });
+        }
+
+        const failedEntries = Array.from(failedTestsByKey.values());
+        if (failedEntries.length === 0) {
+            setHasFailedTestsContext(false);
+            vscode.window.showInformationMessage('ABLUnit: No failed tests to rerun');
+            return Promise.resolve({ code: null, cancelled: false });
+        }
+
+        const primaryFilePath = failedEntries[0].filePath;
+        const outputChannel = getAblUnitOutputChannel();
+        outputChannel.clear();
+
+        const projectCfg = loadOpenEdgeProjectConfig(primaryFilePath);
+        const dlcEnv = process.env.DLC || process.env.dlc;
+        const runtimeConfig = getOpenEdgeAblRuntimeConfig(primaryFilePath);
+        const projectDlc = resolveDlcFromOpenEdgeProject(projectCfg, runtimeConfig);
+        const hasRiversideProjectConfig = !!(projectCfg && (
+            projectCfg.oeversion ||
+            projectCfg.oeVersion ||
+            runtimeConfig ||
+            (Array.isArray(projectCfg.buildPath) && projectCfg.buildPath.length > 0) ||
+            (Array.isArray(projectCfg.dbConnections) && projectCfg.dbConnections.length > 0) ||
+            projectCfg.extraParameters ||
+            projectCfg.propath
+        ));
+        const effectiveDlc = projectDlc || dlcEnv;
+        if (!effectiveDlc) {
+            vscode.window.showErrorMessage('DLC could not be resolved. Set environment variable DLC or configure abl.configuration.runtimes to match openedge-project.json oeversion.');
+            return Promise.resolve({ code: null, cancelled: false });
+        }
+
+        const fallbackProjectCfg = !hasRiversideProjectConfig && effectiveDlc
+            ? { ...projectCfg, buildPath: [{ type: 'propath', path: effectiveDlc }] }
+            : projectCfg;
+
+        const isWindows = process.platform === 'win32';
+        const runner = path.join(context.extensionPath, 'resources', 'scripts', isWindows ? 'run_ABLUNIT.bat' : 'run_ABLUNIT.sh');
+        const runnerCommand = isWindows ? `"${runner}"` : `sh "${runner}"`;
+        const extraParams = fallbackProjectCfg.extraParameters || '';
+        const propathStr = buildPropathStr(fallbackProjectCfg);
+        const resolvedPropathStr = resolvePropathDlc(propathStr, effectiveDlc);
+        const dbConnectStr = getDbConnectsSpaceSeparated(fallbackProjectCfg);
+
+        const primaryUri = vscode.Uri.file(primaryFilePath);
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(primaryUri);
+        const workdir = workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(primaryFilePath);
+
+        // Build deduplicated comma-separated "<relPath>#<testName>" list for a single _progres batch session
+        const seenTargets = new Set();
+        const targetList = [];
+        for (const entry of failedEntries) {
+            const entryCfg = loadOpenEdgeProjectConfig(entry.filePath);
+            const target = formatAblTestTarget(entry.filePath, entry.testName, workdir, entryCfg);
+            if (target && !seenTargets.has(target)) {
+                seenTargets.add(target);
+                targetList.push(target);
+            }
+        }
+        const testFileArg = targetList.join(',');
+
+        const outputFolder = path.join(workdir, '.ablunitrunner');
+        try {
+            if (!fs.existsSync(outputFolder)) {
+                fs.mkdirSync(outputFolder, { recursive: true });
+            }
+
+            const dbConnFilePath = path.join(outputFolder, 'dbconn.pf');
+            fs.writeFileSync(dbConnFilePath, dbConnectStr, 'utf8');
+
+            const extraPfPath = path.join(outputFolder, 'extra.pf');
+            fs.writeFileSync(extraPfPath, extraParams || '', 'utf8');
+
+            const resultsXmlPath = path.join(outputFolder, 'results.xml');
+            try {
+                if (fs.existsSync(resultsXmlPath)) {
+                    fs.unlinkSync(resultsXmlPath);
+                }
+            } catch (delErr) {
+                console.error('Failed to delete previous results.xml:', delErr);
+            }
+        } catch (err) {
+            console.error('Failed to write to .ablunitrunner folder:', err);
+            vscode.window.showErrorMessage('Failed to write to .ablunitrunner folder: ' + err.message);
+            return Promise.resolve({ code: null, cancelled: false });
+        }
+
+        // Start a scoped TestRun without clearing controller.items so previously passed items stay visible
+        let activeTestRun;
+        try {
+            const rerunItems = failedEntries.map(e => e.testItem).filter(Boolean);
+            const runRequest = rerunItems.length > 0
+                ? new vscode.TestRunRequest(rerunItems)
+                : new vscode.TestRunRequest();
+            activeTestRun = controller.createTestRun(runRequest, 'ABLUnit Rerun Failed Tests', true);
+            for (const item of rerunItems) {
+                if (typeof activeTestRun.started === 'function') {
+                    activeTestRun.started(item);
+                }
+            }
+            vscode.commands.executeCommand('workbench.view.testing');
+            vscode.commands.executeCommand('testing.showMostRecentOutput');
+        } catch (runErr) {
+            console.error('Failed to create active TestRun for rerun:', runErr);
+        }
+
+        const commandString = `${runnerCommand} --workdir "${workdir}" --testfile "${testFileArg}"` +
+            (resolvedPropathStr ? ` --propath "${resolvedPropathStr}"` : '') +
+            (effectiveDlc ? ` --dlc "${effectiveDlc}"` : '');
+
+        return executeCommandString(
+            commandString,
+            workdir,
+            () => readResultsXml(outputFolder, workdir, fallbackProjectCfg, activeTestRun, { merge: true }),
+            effectiveDlc,
+            { testRun: activeTestRun }
+        );
     });
     
     context.subscriptions.push(runABLUnitOnFile);
     context.subscriptions.push(runABLUnitOnTestItem);
+    context.subscriptions.push(rerunFailedTests);
     context.subscriptions.push(runABLUnitOnTestSuite);
 
 }
 
 // This method is called when your extension is deactivated
-function deactivate() {}
+function deactivate() {
+    failedTestsByKey.clear();
+    if (activeAblUnitSession) {
+        activeAblUnitSession.disposeOnDeactivate();
+    }
+    if (ablUnitOutputChannel) {
+        ablUnitOutputChannel.dispose();
+        ablUnitOutputChannel = undefined;
+    }
+}
 
 module.exports = {
 	activate,

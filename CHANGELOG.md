@@ -1,3 +1,10 @@
+## 1.0.20
+
+- **Improvements:**
+  - Added ability to stop/cancel a running ABLUnit test session via the status bar spinner (with confirmation prompt) or VS Code's native Testing **Stop** button across Windows and Linux.
+  - Added an active-session guard to prevent accidental overlapping ABLUnit runs.
+  - Added `Rerun Failed Tests` context menu command in Test Explorer and Test Results views to execute all failed test cases in a single OpenEdge batch session and update results in-place.
+
 ## 1.0.19
 
 - **Bugfixes:** 
