@@ -1,3 +1,9 @@
+## 1.0.21
+
+- **Improvements:**
+  - Added support for custom OpenEdge ABL profiles selected in `.vscode/profile.json`, overriding `openedge-project.json` settings (`oeversion`, `buildPath`, `dbConnections`, `extraParameters`, etc.) with recursive `inherits` resolution and fallback to default configuration.
+  - Added support for running ABLUnit across multiple `.cls` and `.p` files, folders, or mixed selections of files and folders at the same time in the Explorer view in a single OpenEdge batch session (recursively discovering `.cls` and `.p` test files in selected folders, logging explicitly selected unsupported items, and guarding against cross-project selections).
+
 ## 1.0.20
 
 - **Improvements:**

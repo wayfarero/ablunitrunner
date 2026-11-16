@@ -34,12 +34,11 @@
 
 ## Release Notes
 
-### 1.0.20
+### 1.0.21
 
 - **Improvements:**
-  - Added ability to stop/cancel a running ABLUnit test session via the status bar spinner (with confirmation prompt) or VS Code's native Testing **Stop** button across Windows and Linux.
-  - Added an active-session guard to prevent accidental overlapping ABLUnit runs.
-  - Added `Rerun Failed Tests` context menu command in Test Explorer and Test Results views to execute all failed test cases in a single OpenEdge batch session and update results in-place.
+  - Added support for custom OpenEdge ABL profiles selected in `.vscode/profile.json`, overriding `openedge-project.json` settings (`oeversion`, `buildPath`, `dbConnections`, `extraParameters`, etc.) with recursive `inherits` resolution and fallback to default configuration.
+  - Added support for running ABLUnit across multiple `.cls` and `.p` files, folders, or mixed selections of files and folders at the same time in the Explorer view in a single OpenEdge batch session (recursively discovering `.cls` and `.p` test files in selected folders, logging explicitly selected unsupported items, and guarding against cross-project selections).
 
 For the complete release history, see [CHANGELOG.md](CHANGELOG.md).
 

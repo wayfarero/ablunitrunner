@@ -93,11 +93,10 @@ function isProcessGroupAlive(pid) {
  * Returns a cleanup callback to clear any pending escalation timer.
  *
  * @param {import('child_process').ChildProcess | null} proc
- * @param {vscode.OutputChannel} [outputChannel]
  * @param {boolean} [immediate=false]
  * @returns {() => void}
  */
-function terminateProcessTree(proc, outputChannel, immediate = false) {
+function terminateProcessTree(proc, immediate = false) {
     if (!proc || proc.pid === undefined || proc.pid === null) {
         return () => {};
     }
@@ -143,9 +142,7 @@ function terminateProcessTree(proc, outputChannel, immediate = false) {
     sendGroupSignal('SIGTERM');
     const escalationTimer = setTimeout(() => {
         if (isProcessGroupAlive(pid)) {
-            if (outputChannel) {
-                outputChannel.appendLine(`Process group ${pid} still running after ${LINUX_KILL_GRACE_MS / 1000}s; escalating to SIGKILL.`);
-            }
+            getAblUnitOutputChannel().appendLine(`Process group ${pid} still running after ${LINUX_KILL_GRACE_MS / 1000}s; escalating to SIGKILL.`);
             sendGroupSignal('SIGKILL');
         }
     }, LINUX_KILL_GRACE_MS);
@@ -409,13 +406,121 @@ function getDbConnectsSpaceSeparated(projectCfg) {
 }
 
 /**
- * Load and parse `openedge-project.json` from the supplied path.
+ * Read the active OpenEdge ABL profile name from `<projectRoot>/.vscode/profile.json`.
+ *
+ * @param {string} projectRoot
+ * @returns {string|undefined}
+ */
+function readActiveProfileName(projectRoot) {
+    if (!projectRoot) return undefined;
+
+    const profilePath = path.join(projectRoot, '.vscode', 'profile.json');
+    if (!fs.existsSync(profilePath)) {
+        return undefined;
+    }
+
+    try {
+        const raw = fs.readFileSync(profilePath, 'utf8').trim();
+        if (!raw) {
+            return undefined;
+        }
+
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+            const candidate = parsed.profile ?? parsed.name;
+            return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : undefined;
+        }
+
+        return undefined;
+    } catch (err) {
+        console.error('Failed to read .vscode/profile.json:', err);
+        return undefined;
+    }
+}
+
+/**
+ * Resolve and merge a named OpenEdge ABL profile from `openedge-project.json` onto root defaults,
+ * following `inherits` chains recursively with cycle protection.
+ *
+ * @param {Object} baseCfg
+ * @param {string|undefined} profileName
+ * @param {{ silent?: boolean }} [options]
+ * @returns {Object}
+ */
+function resolveOpenEdgeProfileConfig(baseCfg, profileName, options) {
+    if (!baseCfg || typeof baseCfg !== 'object' || !profileName || profileName === 'default') {
+        return baseCfg;
+    }
+
+    const silent = Boolean(options?.silent);
+    const profiles = Array.isArray(baseCfg.profiles) ? baseCfg.profiles : [];
+    const findProfile = (name) => profiles.find(p => p && typeof p === 'object' && p.name === name);
+
+    const targetProfile = findProfile(profileName);
+    if (!targetProfile) {
+        if (!silent) {
+            getAblUnitOutputChannel().appendLine(`Warning: OpenEdge ABL profile '${profileName}' not found in openedge-project.json; using default configuration.`);
+        }
+        return baseCfg;
+    }
+
+    // Build inheritance chain from derived -> root-most ancestor, guarding against cycles
+    const chain = [];
+    const visited = new Set();
+    let current = targetProfile;
+
+    while (current) {
+        if (visited.has(current.name)) {
+            if (!silent) {
+                getAblUnitOutputChannel().appendLine(`Warning: Circular profile inheritance detected at '${current.name}'; stopping inheritance chain.`);
+            }
+            break;
+        }
+        visited.add(current.name);
+        chain.push(current);
+
+        const parentName = typeof current.inherits === 'string' ? current.inherits.trim() : '';
+        if (!parentName || parentName === 'default') {
+            break;
+        }
+
+        const parentProfile = findProfile(parentName);
+        if (!parentProfile) {
+            if (!silent) {
+                getAblUnitOutputChannel().appendLine(`Warning: Parent OpenEdge ABL profile '${parentName}' inherited by '${current.name}' not found; stopping at root defaults.`);
+            }
+            break;
+        }
+        current = parentProfile;
+    }
+
+    const merged = { ...baseCfg };
+    for (let i = chain.length - 1; i >= 0; i--) {
+        const profileValue = chain[i].value;
+        if (profileValue && typeof profileValue === 'object') {
+            Object.assign(merged, profileValue);
+        }
+    }
+
+    Object.defineProperty(merged, '_resolvedProfileName', {
+        value: profileName,
+        enumerable: false,
+        configurable: true
+    });
+
+    return merged;
+}
+
+/**
+ * Load and parse `openedge-project.json` from the supplied path, applying any active
+ * custom profile from `<oeProjectRoot>/.vscode/profile.json`.
  * Returns an object (empty on missing file or parse errors).
  *
  * @param {string|undefined} filePath
+ * @param {{ silent?: boolean }} [options]
  * @returns {Object}
  */
-function loadOpenEdgeProjectConfig(filePath) {
+function loadOpenEdgeProjectConfig(filePath, options) {
     let cfg = {};
     let workspaceRoot;
     let oeProjectRoot;
@@ -456,6 +561,11 @@ function loadOpenEdgeProjectConfig(filePath) {
         } catch (err) {
            vscode.window.showErrorMessage('Failed to load openedge-project.json: ' + (err.message || err.toString()));
         }
+    }
+
+    const activeProfileName = readActiveProfileName(oeProjectRoot);
+    if (activeProfileName) {
+        cfg = resolveOpenEdgeProfileConfig(cfg, activeProfileName, options);
     }
 
     if (!cfg.buildPath && fs.existsSync(propathPath)) {
@@ -731,13 +841,14 @@ function expandDlcPlaceholders(value, dlcPath) {
  * @param {string} filePath
  * @param {function|string|undefined} [onCloseCommand]
  * @param {string|undefined} [resolvedDlc]
- * @param {{ testRun?: vscode.TestRun, cancellationToken?: vscode.CancellationToken }} [runOptions]
+ * @param {{ testRun?: vscode.TestRun, cancellationToken?: vscode.CancellationToken, activeProfileName?: string }} [runOptions]
  * @returns {Promise<{ code: number | null, cancelled: boolean }>}
  */
 function executeCommandString(commandString, filePath, onCloseCommand, resolvedDlc, runOptions) {
     return new Promise((resolve) => {
         const testRun = runOptions?.testRun;
         const externalToken = runOptions?.cancellationToken;
+        const activeProfileName = runOptions?.activeProfileName;
         let runStatus = null;
         let clearKillTimer = () => {};
         let runTokenListener = null;
@@ -769,11 +880,13 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
 
         try {
             const workspaceFolderPath = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath || process.cwd();
-            const outputChannel = getAblUnitOutputChannel();
             runStatus = startAblUnitRunStatus(STOP_ABLUNIT_COMMAND_ID);
-            outputChannel.show(true);
+            getAblUnitOutputChannel().show(true);
+            if (activeProfileName) {
+                getAblUnitOutputChannel().appendLine(`Using OpenEdge ABL profile: ${activeProfileName}`);
+            }
             const displayCommandString = resolvedDlc ? expandDlcPlaceholders(commandString, resolvedDlc) : commandString;
-            outputChannel.appendLine(`Executing: ${displayCommandString}`);
+            getAblUnitOutputChannel().appendLine(`Executing: ${displayCommandString}`);
 
             const proc = spawn(commandString, {
                 shell: true,
@@ -781,7 +894,7 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
                 env: process.env,
                 detached: process.platform !== 'win32'
             });
-            outputChannel.appendLine(`Started process with PID ${proc.pid}`);
+            getAblUnitOutputChannel().appendLine(`Started process with PID ${proc.pid}`);
             runStatus.setPid(proc.pid);
 
             const session = {
@@ -791,15 +904,15 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
                 cancel: () => {
                     if (session.isCancelled || settled) return;
                     session.isCancelled = true;
-                    outputChannel.appendLine(`Cancelling ABLUnit process${proc.pid ? ` (PID ${proc.pid})` : ''}...`);
-                    clearKillTimer = terminateProcessTree(proc, outputChannel, false);
+                    getAblUnitOutputChannel().appendLine(`Cancelling ABLUnit process${proc.pid ? ` (PID ${proc.pid})` : ''}...`);
+                    clearKillTimer = terminateProcessTree(proc, false);
                 },
                 disposeOnDeactivate: () => {
                     if (settled) return;
                     settled = true;
                     session.isCancelled = true;
                     cleanupSessionResources();
-                    terminateProcessTree(proc, undefined, true);
+                    terminateProcessTree(proc, true);
                     if (runStatus) {
                         runStatus.disposeNow();
                     }
@@ -825,8 +938,8 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
                 }
             }
 
-            proc.stdout.on('data', (data) => outputChannel.append(data.toString()));
-            proc.stderr.on('data', (data) => outputChannel.append(data.toString()));
+            proc.stdout.on('data', (data) => getAblUnitOutputChannel().append(data.toString()));
+            proc.stderr.on('data', (data) => getAblUnitOutputChannel().append(data.toString()));
 
             proc.on('error', (err) => {
                 if (settled) return;
@@ -836,7 +949,7 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
 
                 if (wasCancelled) {
                     runStatus.stop('$(circle-slash) ABLUnit cancelled');
-                    outputChannel.appendLine('ABLUnit run cancelled by user.');
+                    getAblUnitOutputChannel().appendLine('ABLUnit run cancelled by user.');
                     endTestRunSafely();
                     vscode.window.showInformationMessage('ABLUnit run cancelled');
                     resolve({ code: null, cancelled: true });
@@ -844,7 +957,7 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
                 }
 
                 runStatus.stop('$(error) ABLUnit failed');
-                outputChannel.appendLine(`Failed to start process: ${err.message}`);
+                getAblUnitOutputChannel().appendLine(`Failed to start process: ${err.message}`);
                 endTestRunSafely();
                 vscode.window.showErrorMessage(`Failed to run ABLUnit: ${err.message}`);
                 resolve({ code: null, cancelled: false });
@@ -858,7 +971,7 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
 
                 if (wasCancelled) {
                     runStatus.stop('$(circle-slash) ABLUnit cancelled');
-                    outputChannel.appendLine('ABLUnit run cancelled by user.');
+                    getAblUnitOutputChannel().appendLine('ABLUnit run cancelled by user.');
                     endTestRunSafely();
                     vscode.window.showInformationMessage('ABLUnit run cancelled');
                     resolve({ code, cancelled: true });
@@ -866,7 +979,7 @@ function executeCommandString(commandString, filePath, onCloseCommand, resolvedD
                 }
 
                 runStatus.stop(code === 0 ? '$(check) ABLUnit done' : `$(error) ABLUnit failed (${code})`);
-                outputChannel.appendLine(`Process exited with code ${code}`);
+                getAblUnitOutputChannel().appendLine(`Process exited with code ${code}`);
                 const msg = code === 0 ? 'Run completed successfully' : `Run completed with exit code ${code}`;
                 vscode.window.showInformationMessage(msg);
 
@@ -949,6 +1062,233 @@ function formatAblTestTarget(filePath, selectedTestName, workdir, projectCfg) {
 }
 
 /**
+ * Normalize a filesystem path for case-appropriate identity/equality checks.
+ *
+ * @param {string} fsPath
+ * @returns {string}
+ */
+function normalizeFsPathKey(fsPath) {
+    const normalized = path.normalize(fsPath || '');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Recursively collect `.cls` and `.p` files inside a directory in deterministic order,
+ * skipping hidden/metadata/tooling directories and guarding against symlink cycles.
+ *
+ * @param {string} dirPath
+ * @param {(filePath: string) => void} onValidFile
+ * @param {Set<string>} [visitedDirs]
+ */
+function collectAblFilesInDirectory(dirPath, onValidFile, visitedDirs = new Set()) {
+    let canonicalDir = dirPath;
+    try {
+        canonicalDir = fs.realpathSync(dirPath);
+    } catch {
+        // Fall back to dirPath if realpath resolution fails
+    }
+
+    const dirKey = normalizeFsPathKey(canonicalDir);
+    if (visitedDirs.has(dirKey)) {
+        return;
+    }
+    visitedDirs.add(dirKey);
+
+    let entries;
+    try {
+        entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch (err) {
+        console.error(`Failed to read directory ${dirPath}:`, err);
+        return;
+    }
+
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+
+    const shouldSkipSubdir = (name) => !name || name.startsWith('.') || name.toLowerCase() === 'node_modules';
+    const isAblTestFileName = (name) => {
+        const lower = name.toLowerCase();
+        return lower.endsWith('.cls') || lower.endsWith('.p');
+    };
+
+    for (const entry of entries) {
+        const fullPath = path.join(dirPath, entry.name);
+
+        if (entry.isDirectory()) {
+            if (!shouldSkipSubdir(entry.name)) {
+                collectAblFilesInDirectory(fullPath, onValidFile, visitedDirs);
+            }
+            continue;
+        }
+
+        if (entry.isFile()) {
+            if (isAblTestFileName(entry.name)) {
+                onValidFile(fullPath);
+            }
+            continue;
+        }
+
+        if (entry.isSymbolicLink()) {
+            try {
+                const targetStat = fs.statSync(fullPath);
+                if (targetStat.isDirectory() && !shouldSkipSubdir(entry.name)) {
+                    collectAblFilesInDirectory(fullPath, onValidFile, visitedDirs);
+                } else if (targetStat.isFile() && isAblTestFileName(entry.name)) {
+                    onValidFile(fullPath);
+                }
+            } catch {
+                // Ignore broken symlinks inside expanded folders
+            }
+        }
+    }
+}
+
+/**
+ * Resolve and filter arguments passed to `ABLUnitRunner.RunABLUnitOnFile` across Explorer
+ * file/folder multi-selection (`vscode.Uri[]`), single-test reruns (`string`), Editor menus, and Command Palette.
+ *
+ * @param {vscode.Uri|undefined} resource
+ * @param {vscode.Uri[]|string|undefined} secondArg
+ * @returns {{
+ *   hasCandidates: boolean,
+ *   validFiles: string[],
+ *   emptyDirs: string[],
+ *   skippedItems: Array<{ filePath: string, reason: string }>,
+ *   selectedTestName: string|undefined
+ * }}
+ */
+function resolveRunFileSelection(resource, secondArg) {
+    const reviveUriSafe = (candidate) => {
+        if (!candidate) return undefined;
+        try {
+            const revived = vscode.Uri.revive(candidate);
+            return revived?.fsPath ? revived : undefined;
+        } catch {
+            return typeof candidate.fsPath === 'string' && candidate.fsPath ? candidate : undefined;
+        }
+    };
+
+    const isExplorerSelection = Array.isArray(secondArg);
+    const selectedTestName = !isExplorerSelection && typeof secondArg === 'string'
+        ? secondArg
+        : undefined;
+
+    const rawUris = isExplorerSelection
+        ? (secondArg.length > 0 ? secondArg : (resource ? [resource] : []))
+        : [reviveUriSafe(resource) || vscode.window.activeTextEditor?.document.uri].filter(Boolean);
+
+    const seenCandidateKeys = new Set();
+    const candidatePaths = [];
+    for (const candidate of rawUris) {
+        const uri = reviveUriSafe(candidate);
+        if (!uri?.fsPath) continue;
+        const key = normalizeFsPathKey(uri.fsPath);
+        if (!seenCandidateKeys.has(key)) {
+            seenCandidateKeys.add(key);
+            candidatePaths.push(uri.fsPath);
+        }
+    }
+
+    const validFiles = [];
+    const seenValidKeys = new Set();
+    const addValidFile = (filePath) => {
+        const key = normalizeFsPathKey(filePath);
+        if (!seenValidKeys.has(key)) {
+            seenValidKeys.add(key);
+            validFiles.push(filePath);
+        }
+    };
+
+    const emptyDirs = [];
+    const skippedItems = [];
+    const visitedDirs = new Set();
+    for (const candidatePath of candidatePaths) {
+        let stat;
+        try {
+            stat = fs.statSync(candidatePath);
+        } catch {
+            skippedItems.push({ filePath: candidatePath, reason: 'file not found' });
+            continue;
+        }
+
+        if (stat.isDirectory()) {
+            const countBefore = validFiles.length;
+            collectAblFilesInDirectory(candidatePath, addValidFile, visitedDirs);
+            if (validFiles.length === countBefore) {
+                emptyDirs.push(candidatePath);
+            }
+            continue;
+        }
+        if (!stat.isFile()) {
+            skippedItems.push({ filePath: candidatePath, reason: 'not a regular file' });
+            continue;
+        }
+
+        const lowerPath = candidatePath.toLowerCase();
+        if (!lowerPath.endsWith('.cls') && !lowerPath.endsWith('.p')) {
+            skippedItems.push({ filePath: candidatePath, reason: 'unsupported file extension' });
+            continue;
+        }
+
+        addValidFile(candidatePath);
+    }
+
+    return {
+        hasCandidates: candidatePaths.length > 0,
+        validFiles,
+        emptyDirs,
+        skippedItems,
+        selectedTestName
+    };
+}
+
+/**
+ * Verify that all resolved test files and any selected empty folders belong to the same
+ * VS Code workspace folder and the same OpenEdge project root.
+ *
+ * @param {string[]} filePaths
+ * @param {string[]} [emptyDirs=[]]
+ * @returns {boolean}
+ */
+function areSelectionScopesInSameWorkspaceAndProject(filePaths, emptyDirs = []) {
+    if (!Array.isArray(filePaths) || filePaths.length === 0) {
+        return true;
+    }
+
+    const resolveScopeKeys = (targetPath, isDirectory) => {
+        const startDir = isDirectory ? targetPath : path.dirname(targetPath);
+        const wsFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(targetPath))?.uri.fsPath || '';
+        const oeProjectRoot = findProjectRoot(startDir) || wsFolder || startDir;
+        return {
+            workspaceKey: normalizeFsPathKey(wsFolder),
+            projectKey: normalizeFsPathKey(oeProjectRoot)
+        };
+    };
+
+    const baseKeys = resolveScopeKeys(filePaths[0], false);
+
+    for (let i = 1; i < filePaths.length; i++) {
+        const currentKeys = resolveScopeKeys(filePaths[i], false);
+        if (currentKeys.workspaceKey !== baseKeys.workspaceKey || currentKeys.projectKey !== baseKeys.projectKey) {
+            return false;
+        }
+    }
+
+    for (const dirPath of emptyDirs) {
+        const dirPrefix = normalizeFsPathKey(dirPath) + path.sep;
+        const containsAlreadySelectedFile = filePaths.some(fp => normalizeFsPathKey(fp).startsWith(dirPrefix));
+        if (containsAlreadySelectedFile) {
+            continue;
+        }
+        const dirKeys = resolveScopeKeys(dirPath, true);
+        if (dirKeys.workspaceKey !== baseKeys.workspaceKey || dirKeys.projectKey !== baseKeys.projectKey) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
  * Index existing test case and suite items currently in the TestController tree.
  *
  * @param {vscode.TestController} controller
@@ -1001,8 +1341,7 @@ function indexExistingControllerItems(controller) {
 function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, projectCfg, options) {
     const isMerge = Boolean(options?.merge);
 
-    const outputChannel = getAblUnitOutputChannel();
-    outputChannel.appendLine(`Start loading AblUnit results..`);    
+    getAblUnitOutputChannel().appendLine(`Start loading AblUnit results..`);    
 
     vscode.commands.executeCommand('workbench.view.testing');
     vscode.commands.executeCommand('testing.showMostRecentOutput');
@@ -1218,7 +1557,7 @@ function loadAblUnitResults(controller, xmlPath, run, baseWorkspacePath, project
         }
     }
     setHasFailedTestsContext(failedTestsByKey.size > 0);
-    outputChannel.appendLine(`Done loading AblUnit results.`);    
+    getAblUnitOutputChannel().appendLine(`Done loading AblUnit results.`);    
 
 }
 
@@ -1334,36 +1673,61 @@ function activate(context) {
 }
 
 
-    const runABLUnitOnFile = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnFile', function (resource, selectedTestName, cancellationToken) {
+    const runABLUnitOnFile = vscode.commands.registerCommand('ABLUnitRunner.RunABLUnitOnFile', function (resource, secondArg, cancellationToken) {
         // Guard against overlapping runs before touching output channel, TestController, or .ablunitrunner files
         if (activeAblUnitSession) {
             showOverlappingRunWarning();
             return Promise.resolve({ code: null, cancelled: false });
         }
 
-        // When invoked from the explorer/context menu VS Code passes the resource (Uri) as the
-        // first argument. Fall back to the active editor if it's not provided.
-        const filePath = resource?.fsPath || vscode.window.activeTextEditor?.document.uri.fsPath;
+        const {
+            hasCandidates,
+            validFiles,
+            emptyDirs,
+            skippedItems,
+            selectedTestName
+        } = resolveRunFileSelection(resource, secondArg);
 
-        if (!filePath) {
+        if (!hasCandidates) {
             vscode.window.showInformationMessage('ABLUnit: No file selected');
             return Promise.resolve({ code: null, cancelled: false });
         }
 
-        // Start each run with a clean output channel
-        const outputChannel = getAblUnitOutputChannel();
-        outputChannel.clear();
+        if (validFiles.length === 0) {
+            if (skippedItems.length > 0) {
+                getAblUnitOutputChannel().clear();
+                for (const skipped of skippedItems) {
+                    getAblUnitOutputChannel().appendLine(`Skipping unsupported item (${skipped.reason}): ${skipped.filePath}`);
+                }
+            }
+            vscode.window.showInformationMessage('ABLUnit: No valid .cls or .p test files selected');
+            return Promise.resolve({ code: null, cancelled: false });
+        }
 
-        // Attempt to load OpenEdge project configuration from the workspace folder containing the selected file
+        if ((validFiles.length > 1 || emptyDirs.length > 0) && !areSelectionScopesInSameWorkspaceAndProject(validFiles, emptyDirs)) {
+            vscode.window.showWarningMessage(
+                'Selected files or folders span multiple workspace folders or OpenEdge projects. Please select items within the same project.'
+            );
+            return Promise.resolve({ code: null, cancelled: false });
+        }
+
+        const primaryFilePath = validFiles[0];
+
+        // Start each run with a clean output channel and log any skipped items from multi-selection
+        getAblUnitOutputChannel().clear();
+        for (const skipped of skippedItems) {
+            getAblUnitOutputChannel().appendLine(`Skipping unsupported item (${skipped.reason}): ${skipped.filePath}`);
+        }
+
+        // Attempt to load OpenEdge project configuration from the workspace folder containing the selected file(s)
         let projectCfg = {};
-        // Load configuration if found (delegated to helper)
-        projectCfg = loadOpenEdgeProjectConfig(filePath);
+        projectCfg = loadOpenEdgeProjectConfig(primaryFilePath);
 
         // Read DLC from the OpenEdge ABL project config when available, using the
         // runtime entry that matches the project's oeversion. Fall back to the
         // environment variable when the Riverside project config is absent or incomplete.
         const dlcEnv = process.env.DLC || process.env.dlc;
-        const runtimeConfig = getOpenEdgeAblRuntimeConfig(filePath);
+        const runtimeConfig = getOpenEdgeAblRuntimeConfig(primaryFilePath);
         const projectDlc = resolveDlcFromOpenEdgeProject(projectCfg, runtimeConfig);
         const hasRiversideProjectConfig = !!(projectCfg && (
             projectCfg.oeversion ||
@@ -1393,12 +1757,22 @@ function activate(context) {
         const resolvedPropathStr = resolvePropathDlc(propathStr, effectiveDlc);
         const dbConnectStr = getDbConnectsSpaceSeparated(fallbackProjectCfg);
 
+        // Resolve workspace folder and build single or comma-separated relative test target(s)
+        const primaryUri = vscode.Uri.file(primaryFilePath);
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(primaryUri);
+        const workdir = workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(primaryFilePath);
 
-        // Split filePath into workspace folder and relative path
-        const fileUri = vscode.Uri.file(filePath);
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
-        const workdir = workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(filePath);
-        const testFileArg = formatAblTestTarget(filePath, selectedTestName, workdir, projectCfg);
+        const seenTargets = new Set();
+        const targetList = [];
+        const targetTestName = validFiles.length === 1 ? selectedTestName : undefined;
+        for (const targetFilePath of validFiles) {
+            const target = formatAblTestTarget(targetFilePath, targetTestName, workdir, projectCfg);
+            if (target && !seenTargets.has(target)) {
+                seenTargets.add(target);
+                targetList.push(target);
+            }
+        }
+        const testFileArg = targetList.join(',');
 
         const outputFolder = path.join(workdir, '.ablunitrunner');
 
@@ -1461,7 +1835,7 @@ function activate(context) {
             workdir,
             () => readResultsXml(outputFolder, workdir, fallbackProjectCfg, activeTestRun),
             effectiveDlc,
-            { testRun: activeTestRun, cancellationToken }
+            { testRun: activeTestRun, cancellationToken, activeProfileName: projectCfg._resolvedProfileName }
         );
     });
 
@@ -1568,8 +1942,7 @@ function activate(context) {
         }
 
         const primaryFilePath = failedEntries[0].filePath;
-        const outputChannel = getAblUnitOutputChannel();
-        outputChannel.clear();
+        getAblUnitOutputChannel().clear();
 
         const projectCfg = loadOpenEdgeProjectConfig(primaryFilePath);
         const dlcEnv = process.env.DLC || process.env.dlc;
@@ -1609,8 +1982,14 @@ function activate(context) {
         // Build deduplicated comma-separated "<relPath>#<testName>" list for a single _progres batch session
         const seenTargets = new Set();
         const targetList = [];
+        const cfgByDir = new Map([[path.dirname(primaryFilePath), projectCfg]]);
         for (const entry of failedEntries) {
-            const entryCfg = loadOpenEdgeProjectConfig(entry.filePath);
+            const entryDir = path.dirname(entry.filePath);
+            let entryCfg = cfgByDir.get(entryDir);
+            if (!entryCfg) {
+                entryCfg = loadOpenEdgeProjectConfig(entry.filePath, { silent: true });
+                cfgByDir.set(entryDir, entryCfg);
+            }
             const target = formatAblTestTarget(entry.filePath, entry.testName, workdir, entryCfg);
             if (target && !seenTargets.has(target)) {
                 seenTargets.add(target);
@@ -1673,7 +2052,7 @@ function activate(context) {
             workdir,
             () => readResultsXml(outputFolder, workdir, fallbackProjectCfg, activeTestRun, { merge: true }),
             effectiveDlc,
-            { testRun: activeTestRun }
+            { testRun: activeTestRun, activeProfileName: projectCfg._resolvedProfileName }
         );
     });
     
