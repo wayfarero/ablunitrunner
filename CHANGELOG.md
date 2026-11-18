@@ -1,3 +1,8 @@
+## 1.0.22
+
+- **Bugfixes:**
+  - Fixed Linux runner script (`run_ABLUNIT.sh`) line endings to use Unix `LF`.
+
 ## 1.0.21
 
 - **Improvements:**
